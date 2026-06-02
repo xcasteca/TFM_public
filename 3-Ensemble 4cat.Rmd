@@ -1,0 +1,501 @@
+---
+title: "ensemble_4cat"
+output: html_document
+---
+
+# Model ensemble pel problema multiclasse
+
+En aquest capítol ens centrem en obtenir el millor resultat per la mètrica **F1-macro**.
+La variable *y_knn_test* és el conjunt test comú per tots els models, per tant, fem servir aquesta variable, independentment del nom. 
+
+## Vot majoritari 
+
+Els millors resultats obtinguts és quan en aquest model hi introduïm com a models base: k-NN, Ranodm Forest i Support Vector Machine. 
+
+```{r, eval = FALSE, include = FALSE}
+pred_4cat <- data.frame(
+  knn = pred_knn_best,
+  nb  = nb_pred,
+  rf  = rf_coh_pred_best
+  # svm = svm_pred
+)
+
+pred_4cat <- as.data.frame(lapply(pred_4cat, function(x)
+  factor(x, levels = c("1","2","3","4"))
+))
+
+# Aplicar el vot majoritari fila per fila
+vot_maj_4cat <- function(x){
+  names(sort(table(x), decreasing = TRUE))[1]
+}
+
+pred_ens_maj_4cat <- apply(pred_4cat, 1, vot_maj_4cat)
+pred_ens_maj_4cat <- factor(pred_ens_maj_4cat, levels = c("1","2","3","4"))
+```
+
+
+```{r, eval = FALSE, include = FALSE}
+# Avaluem les prediccions d'ensemble:
+cm_maj_4cat <- confusionMatrix(
+  pred_ens_maj_4cat,
+  factor(y_knn_test, levels = c("1","2","3","4")),
+  mode = "prec_recall"
+)
+# F1 per classe
+cm_maj_4cat$byClass[, "F1"]
+
+# F1 macro
+mean(cm_maj_4cat$byClass[, "F1"], na.rm = TRUE)
+
+# Precision
+cm_maj_4cat$byClass[, "Precision"]
+
+# Recall
+cm_maj_4cat$byClass[, "Recall"]
+
+# Accuracy
+cm_maj_4cat$overall["Accuracy"]
+
+# Resultats que obtenim amb tots els models:
+# > # F1 macro
+# > mean(cm_maj_4cat$byClass[, "F1"], na.rm = TRUE)
+# [1] 0.5395648
+# > # Precision
+# > cm_maj_4cat$byClass[, "Precision"]
+#  Class: 1  Class: 2  Class: 3  Class: 4 
+# 0.5934066 0.6056338 0.6200000        NA 
+# > # Accuracy
+# > cm_maj_4cat$overall["Accuracy"]
+#  Accuracy 
+# 0.5989209 
+```
+
+
+
+```{r}
+pred_4cat <- data.frame(
+  knn = pred_knn_best,
+  # nb  = nb_pred,
+  rf  = rf_coh_pred_best,
+  svm = svm_pred
+)
+
+pred_4cat <- as.data.frame(lapply(pred_4cat, function(x)
+  factor(x, levels = c("1","2","3","4"))
+))
+
+# Aplicar el vot majoritari fila per fila
+vot_maj_4cat <- function(x){
+  names(sort(table(x), decreasing = TRUE))[1]
+}
+
+pred_ens_maj_4cat <- apply(pred_4cat, 1, vot_maj_4cat)
+pred_ens_maj_4cat <- factor(pred_ens_maj_4cat, levels = c("1","2","3","4"))
+
+cm_maj_4cat <- confusionMatrix(
+  pred_ens_maj_4cat,
+  factor(y_knn_test, levels = c("1","2","3","4")),
+  mode = "prec_recall"
+)
+# F1 per classe
+cm_maj_4cat$byClass[, "F1"]
+
+# F1 macro
+mean(cm_maj_4cat$byClass[, "F1"], na.rm = TRUE)
+
+# Precision
+cm_maj_4cat$byClass[, "Precision"]
+
+# Recall
+cm_maj_4cat$byClass[, "Recall"]
+
+# Accuracy
+cm_maj_4cat$overall["Accuracy"]
+```
+
+```{r, eval = FALSE, include = FALSE}
+# > # F1 macro
+# > mean(cm_maj_4cat$byClass[, "F1"], na.rm = TRUE)
+# [1] 0.545594
+# > 
+# > # Precision
+# > cm_maj_4cat$byClass[, "Precision"]
+#  Class: 1  Class: 2  Class: 3  Class: 4 
+# 0.5994318 0.6026490 0.6037736        NA 
+# > 
+# > # Accuracy
+# > cm_maj_4cat$overall["Accuracy"]
+#  Accuracy 
+# 0.6007194 
+```
+
+
+
+## Promig de probabilitats
+
+Necessitem obtenir les probabilitats de cada classe per cada model de les observacions, de tal manera que per cada model obtenim una matriu de probabilitats de les quatre classes. 
+
+Pel model *k-NN* construïm les probabilitats a través del *nn.index*.
+
+```{r, results='hide'}
+nn_index <- attr(pred_knn_best, "nn.index")
+k_knn <- ncol(nn_index)   # nombre de veïns utilitzats
+
+# Vector amb les classes reals del train
+y_knn_train
+
+# Matriu buida de probabilitats
+prob_knn_4cat <- matrix(0, nrow = nrow(nn_index), ncol = 4)
+colnames(prob_knn_4cat) <- c("1","2","3","4")
+
+# Omplir probabilitats
+for(i in 1:nrow(nn_index)){
+  veïns <- nn_index[i, ]
+  classes_veins <- y_knn_train[veïns]
+  prob_knn_4cat[i, ] <- table(factor(classes_veins, 
+                                     levels = c("1","2","3","4"))) / k_knn
+}
+prob_knn_4cat <- as.data.table(prob_knn_4cat)
+```
+
+Per Naive Bayes, Random Forest i Support Vector Machine:
+```{r}
+prob_nb_4cat <- as.data.table(prob_nb_4cat)
+prob_rf_4cat <- as.data.table(prob_rf_4cat)
+prob_svm_4cat <- as.data.table(prob_svm_4cat)
+```
+
+Calculem la mitjana de les probabilitats dels quatre models base. 
+```{r}
+prob_ensemble <- (prob_knn_4cat + prob_nb_4cat + prob_rf_4cat + prob_svm_4cat)/4
+
+pred_ensemble <- apply(prob_ensemble, 1, function(x) which.max(x))
+pred_ensemble <- factor(pred_ensemble, levels = c("1","2","3","4"))
+
+prob_ens_4cat_cm <- confusionMatrix(pred_ensemble, 
+                                    factor(y_knn_test, 
+                                           levels = c("1", "2", "3", "4")), 
+                                    mode="prec_recall")
+
+```
+
+```{r}
+# F1-score per classe:
+prob_ens_4cat_f1_classe  <- prob_ens_4cat_cm$byClass[, "F1"]
+
+
+# F1-macro
+mean(prob_ens_4cat_f1_classe, na.rm = TRUE)
+
+# VPP = valor predictiu positiu
+prob_ens_4cat_cm$byClass[,"Precision"]
+
+# Recall
+prob_ens_4cat_cm$byClass[, "Recall"]
+
+
+# Accuracy
+prob_ens_4cat_cm$overall["Accuracy"]
+```
+
+Observem que obtenim millors resultats sútilment si excluim el model SVM.
+
+```{r}
+prob_ensemble_WOsvm <- (prob_knn_4cat + prob_nb_4cat + prob_rf_4cat) / 3
+
+pred_ensemble_WOsvm <- apply(prob_ensemble_WOsvm, 1, function(x) which.max(x))
+pred_ensemble_WOsvm <- factor(pred_ensemble_WOsvm, levels = c("1","2","3","4"))
+
+prob_WOsvm_ens_4cat_cm <- confusionMatrix(pred_ensemble_WOsvm, 
+                                    factor(y_knn_test, 
+                                           levels = c("1", "2", "3", "4")), 
+                                    mode="prec_recall")
+
+# F1-score per classe:
+prob_WOsvm_ens_4cat_f1_classe  <- prob_WOsvm_ens_4cat_cm$byClass[, "F1"]
+# F1-macro
+mean(prob_WOsvm_ens_4cat_f1_classe, na.rm = TRUE)
+# VPP = valor predictiu positiu
+prob_WOsvm_ens_4cat_cm$byClass[,"Precision"]
+# Recall
+prob_WOsvm_ens_4cat_cm$byClass[,"Recall"]
+# Accuracy
+prob_WOsvm_ens_4cat_cm$overall["Accuracy"]
+```
+
+## Stacking 
+
+En aquest apartat fem l'ensemble utilitzant el mètode *Stacking*. La metodologia és entrenar varis models (k-NN, Naive Bayes, Random Forest i Support Vector Machine) i usar un meta-model per aprendre a combinar-los. Per això, generem 5 folds per generar les prediccions. 
+
+```{r}
+y_train_4cat <- factor(y_knn_train, levels = c("1", "2", "3", "4"))
+y_test_4cat  <- factor(y_knn_test, levels = c("1", "2", "3", "4"))
+
+folds_4cat   <- createFolds(y_train_4cat, k = 5) 
+```
+
+### k-NN 4cat ensemble
+
+Creem el vector de les prediccions OOF per cada model. Comencem amb el veïns pròxims prenent $k=9$, ja que anteriorment hem vist que és l'òptim. 
+
+```{r}
+oof_knn_4cat <- factor(rep(NA, length(y_train_4cat)),
+                       levels = levels(y_train_4cat))
+for(i in seq_along(folds_4cat)){
+  idx <- folds_4cat[[i]]
+  x_knn_train_4cat_fold <- x_knn_train[-idx,]
+  y_knn_train_4cat_fold <- y_train_4cat[-idx]
+  
+  x_knn_4cat_valid_fold <- x_knn_train[idx,]
+  
+  pred_knn_4cat_fold    <- knn(train = x_knn_train_4cat_fold,
+                               test  = x_knn_4cat_valid_fold,
+                               cl    = y_knn_train_4cat_fold,
+                               k     = 9)
+  oof_knn_4cat[idx] <- pred_knn_4cat_fold
+}
+```
+Fem les prediccions sobre el test:
+
+```{r}
+knn_stack_best_4cat <- knn(train = x_knn_train,
+                           test  = x_knn_test,
+                           cl    = y_train_4cat,
+                           k     = 9)
+```
+
+### Naive Bayes 4cat ensemble
+
+Generem les prediccions OOF del Naive Bayes.
+
+```{r}
+oof_nb_4cat <- factor(rep(NA, length(y_train_4cat)), 
+                      levels = levels(y_train_4cat))
+
+for(i in seq_along(folds_4cat)){
+  idx <- folds_4cat[[i]]
+  
+  x_nb_train_4cat_fold <- nb_train[-idx, ..vars_pred_coh]
+  y_nb_train_4cat_fold <- y_train_4cat[-idx]
+  
+  x_nb_4cat_valid_fold <- nb_train[idx, ..vars_pred_coh]
+  
+  nb_fold_model_4cat   <- naiveBayes(x = x_nb_train_4cat_fold,
+                                     y = y_nb_train_4cat_fold,
+                                     laplace = 1)
+  
+  pred_nb_4cat_fold    <- predict(nb_fold_model_4cat,
+                                  newdata = x_nb_4cat_valid_fold)
+  
+  oof_nb_4cat[idx]     <- pred_nb_4cat_fold
+}
+```
+Prediccions del Naive Bayes sobre el test.
+```{r}
+nb_stack_best_4cat <- naiveBayes(Dx_4cat ~ .,
+                                 data = nb_train,
+                                 laplace = 1)
+pred_nb_test_4cat  <- predict(nb_stack_best_4cat, 
+                              newdata = nb_test)
+```
+
+
+### Random Forest 4cat ensemble
+
+Generem les prediccions OOF del Random Forest amb els hiperparàmetres òptims (num.trees = 500, mtry = 2, min.node.size = 1 i class.weights = NULL). 
+
+```{r}
+oof_rf_4cat <- factor(rep(NA, length(y_train_4cat)),
+                       levels = levels(y_train_4cat))
+
+for(i in seq_along(folds_4cat)){
+  idx <- folds_4cat[[i]]
+  
+  x_rf_train_4cat_fold <- rf_coh_train[-idx, ..vars_pred_coh]
+  y_rf_train_4cat_fold <- y_train_4cat[-idx]
+  
+  x_rf_4cat_valid_fold <- rf_coh_train[idx, ..vars_pred_coh]
+  
+  rf_fold_model_4cat   <- ranger(Dx_4cat ~ .,
+                                 data = data.frame(
+                                   Dx_4cat = y_knn_train_4cat_fold,
+                                   x_knn_train_4cat_fold),
+                                 num.trees = 500,
+                                 mtry = 2,
+                                 min.node.size = 1,
+                                 class.weights = NULL,
+                                 seed = 123
+  )
+  
+  pred_rf_4cat_fold <- predict(rf_fold_model_4cat, 
+                               data = x_rf_4cat_valid_fold)$predictions
+  
+  oof_rf_4cat[idx] <- pred_rf_4cat_fold
+}
+```
+Prediccions del Random Forest sobre el test.
+
+```{r}
+rf_stack_best_4cat <- ranger(Dx_4cat ~ ., 
+                             data = rf_coh_train,
+                             num.trees = 500,
+                             mtry = 2,
+                             min.node.size = 1,
+                             class.weights = NULL,
+                             seed = 123)
+# Prediccions òptimes
+pred_rf_test_4cat <- predict(rf_stack_best_4cat,
+                             data = rf_coh_test)$predictions
+```
+
+
+### Support Vector Machine 4cat ensemble
+
+Generem les prediccions OOF del Support Vector Machine amb els hiperparàemtres òptims (kernel = "linear" i cost = 1):
+```{r}
+oof_svm_4cat <- factor(rep(NA, length(y_train_4cat)),
+                       levels = levels(y_train_4cat))
+for(i in seq_along(folds_4cat)){
+  idx <- folds_4cat[[i]]
+  # TRAIN dins del train
+  x_svm_train_4cat_fold <- svm_train[-idx, ..vars_pred_coh]
+  y_svm_train_4cat_fold <- y_train_4cat[-idx]
+  # Validació dins del train
+  x_svm_4cat_valid_fold <- svm_train[idx, ..vars_pred_coh]
+  # Entrenament del SVM amb els millors hiperparàmetres
+  svm_fold_model_4cat   <- svm(x = x_svm_train_4cat_fold,
+                               y = y_svm_train_4cat_fold,
+                               kernel = "linear",
+                               cost = 1,
+                               sclae = TRUE,
+                               probability = TRUE)
+  # Predicció OOF
+  pred_svm_test_4cat <- predict(svm_fold_model_4cat,
+                                newdata = x_svm_4cat_valid_fold)
+  oof_svm_4cat[idx] <- pred_svm_test_4cat
+}
+```
+Prediccions del SVM sobre el TEST.
+```{r}
+svm_stack_best_4cat <- svm(x = svm_train[, ..vars_pred_coh],
+                           y = y_train_4cat,
+                           kernel = "linear",
+                           cost = 1,
+                           probability = TRUE,
+                           scale = TRUE)
+pred_svm_test_4cat <- predict(svm_stack_best_4cat,
+                              newdata = svm_test[, ..vars_pred_coh])
+```
+
+## Meta-model 
+
+Creem el meta-model amb els 4 models base.
+
+```{r}
+# Train del meta-model
+stack_train_4cat <- data.frame(
+  knn = factor(oof_knn_4cat, levels = c("1", "2", "3", "4")),
+  nb  = factor(oof_nb_4cat, levels = levels(y_train_4cat)),
+  rf  = oof_rf_4cat,
+  svm = factor(oof_svm_4cat, levels = levels(y_train_4cat)),
+  y   = y_train_4cat
+)
+
+# Test del meta-model
+stack_test_4cat <- data.frame(
+  knn = factor(pred_knn_best, levels = levels(y_train_4cat)),
+  nb  = factor(pred_nb_test_4cat, levels = levels(y_train_4cat)),
+  rf  = factor(colnames(prob_rf_4cat)[max.col(prob_rf_4cat)], 
+               levels = levels(y_train_4cat)),
+  svm = factor(pred_svm_test_4cat, levels = levels(y_train_4cat))
+)
+```
+
+Entrenem el meta-model amb Random Forest.
+
+```{r}
+meta_model_4cat <- randomForest(y ~ .,
+                                data = stack_train_4cat,
+                                ntree = 500)
+pred_final_4cat <- predict(meta_model_4cat, stack_test_4cat)
+```
+
+Avaluació.
+```{r}
+stack_cm_4cat <- confusionMatrix(pred_final_4cat,
+                                 y_test_4cat,
+                                 mode = "prec_recall")
+
+
+# F1-score per classe:
+stack_f1_classe  <- stack_cm_4cat$byClass[, "F1"]
+stack_f1_classe
+
+# F1-macro
+mean(stack_f1_classe, na.rm = TRUE)
+
+# VPP = valor predictiu positiu
+stack_cm_4cat$byClass[,"Precision"]
+
+# Recall
+stack_cm_4cat$byClass[,"Recall"]
+
+# Accuracy
+stack_cm_4cat$overall["Accuracy"]
+```
+```{r, eval=FALSE, include = FALSE}
+# > # F1-score per classe:
+# > stack_f1_classe  <- stack_cm_4cat$byClass[, "F1"]
+# > stack_f1_classe
+#  Class: 1  Class: 2  Class: 3  Class: 4 
+# 0.6928328 0.6047904 0.3736264        NA 
+# > 
+# > # F1-macro
+# > mean(stack_f1_classe, na.rm = TRUE)
+# [1] 0.5570832
+# > 
+# > # VPP = valor predictiu positiu
+# > stack_cm_4cat$byClass[,"Precision"]
+#  Class: 1  Class: 2  Class: 3  Class: 4 
+# 0.6284830 0.6011905 0.5230769        NA 
+# > 
+# > 
+# > # Accuracy
+# > stack_cm_4cat$overall["Accuracy"]
+#  Accuracy 
+# 0.6079137
+```
+
+
+
+## Resultats pel problema multiclasse
+
+Un cop tenim els resultats per cada model, els posem en comú fent servir el resultat amb millor rendiment que hem trobat en cada cas amb la mètrica *F1-macro*:
+
+```{r, include = FALSE}
+res_ensembl_4cat <- data.frame(
+  model = c("vot majoritari", "promig probabilitats", "stacking"),
+  f1macro = c(mean(cm_maj_4cat$byClass[, "F1"], na.rm = TRUE),
+              mean(prob_WOsvm_ens_4cat_f1_classe, na.rm = TRUE),
+              mean(stack_f1_classe, na.rm = TRUE)
+              )
+)
+```
+
+```{r, fig.width=10, fig.height=6, echo = FALSE}
+ggplot(res_ensembl_4cat, aes(x = reorder(model, f1macro), y = f1macro, fill = model)) +
+  geom_col(width = 0.6) + 
+  geom_text(aes(label = round(f1macro, 3)), vjust = -0.5) +
+  theme_minimal() +
+  theme(legend.position = "none") +
+  labs(
+    title = "F1-macro entre models",
+    x = "Model",
+    y = "F1-macro"
+  )
+```
+
+
+
+Obtenim que el millor resultat és amb el model *stacking* i, a més, és superior que el resultat trobat del millor model individual.
+

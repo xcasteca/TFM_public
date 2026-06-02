@@ -1,0 +1,569 @@
+---
+title: "Models"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+# Aplicació models al problema multiclasse
+
+## k-NN, veïns pròxims
+
+Farem 3 possibles maneres d'utilitzar aquest model per tal de veure si aconseguim millorar el seu rendiment, primer utilitzem el model optimitzant el k òptim i després intentarem reduir la dimensionalitat. Anem a veure-ho, primer preparem les dades que ens serviran per les diferenst opcions:
+
+```{r}
+knn_coh <- copy(cohort)
+knn_y <- knn_coh$Dx_4cat
+knn_coh <- knn_coh[, .SD, .SDcols = vars_pred_coh]
+data.table::setDT(knn_coh)
+normalize  <- function(x){
+  return( (x - min(x)) / (max(x) - min(x)) )
+}
+
+vars_pred_norm_knn <- c("EDAT", "ESCALA_RACE", "TAS", "TAD", "GLIC", "diff_hora_seg",
+                        "Hora_sin", "Hora_cos")
+knn_coh[, (vars_pred_norm_knn) := lapply(.SD, normalize), .SDcols = vars_pred_norm_knn ]
+knn_x <- copy(knn_coh)
+
+p_coh <- 0.7
+set.seed(123)
+train_coh <- sample(nrow(cohort), floor(nrow(cohort)*p_coh))
+
+# Cjnt. entrenament
+x_knn_train <- knn_x[train_coh,]
+y_knn_train <- knn_y[train_coh]
+
+# Cjnt. test
+x_knn_test  <- knn_x[-train_coh,]
+y_knn_test  <- knn_y[-train_coh]
+```
+
+Ara observem els valors de *k* per determinar quin és el més òptim.
+
+```{r, warning=FALSE}
+acc_knn <- c()
+k <- seq(1, 21, by = 2)
+j <- 1
+resultats_knn <- list()
+for(i in k) {
+  set.seed(123)
+  pred_opt_knn <- knn(train = x_knn_train, test = x_knn_test, cl = y_knn_train, k = i)
+  cm_knn <- confusionMatrix(pred_opt_knn, as.factor(y_knn_test), mode = "prec_recall")
+  acc_knn[j] <- cm_knn$overall["Accuracy"]
+  macro_F1_knn <- mean(cm_knn$byClass[,"F1"], na.rm = TRUE)
+  resultats_knn[[paste0("k=", i)]] <- macro_F1_knn
+  j <- j+1
+}
+```
+
+```{r, fig.width=10, fig.height=6}
+plot(k, acc_knn, type = "b", col = "blue", xlab = "k", ylab = "Accuracy")
+plot(k, resultats_knn, type = "b", col = "blue", xlab = "k", ylab = "F1-macro")
+```
+
+```{r}
+# Si triem el millor per F1-macro:
+names(resultats_knn)[which.max(unlist(resultats_knn))] 
+max(unlist(resultats_knn))
+```
+
+Per la *k* trobada fem les prediccions i la seva avaluació.
+
+```{r}
+set.seed(123)
+pred_knn_best <- knn(train = x_knn_train, test = x_knn_test, cl = y_knn_train, k = 9)
+knn_conf_mat_best <- confusionMatrix(pred_knn_best, as.factor(y_knn_test), mode = "prec_recall")
+# F1-score per classe:
+knn_conf_mat_best$byClass[,"F1"]
+# F1-macro
+mean(knn_conf_mat_best$byClass[,"F1"], na.rm = TRUE)
+
+# VPP = valor predictiu positiu
+knn_conf_mat_best$byClass[,"Precision"]
+
+# Recall
+knn_conf_mat_best$byClass[,"Recall"]
+
+# Accuracy
+knn_conf_mat_best$overall["Accuracy"]
+```
+
+El model no està aprenent la classe 4, tot i que les altres classes tenen un bon rendiment.
+
+Ara apliquem l'anàlisi de components principals (PCA), per observar si reduir dimensionalitat evitant les variables més correlacionades, s'aconsegueix un rendiment superior.
+
+```{r}
+pca_knn <- prcomp(x_knn_train, center = TRUE, scale. = TRUE)
+summary(pca_knn)
+screeplot(pca_knn, type = "lines")
+var_acum_knn <- summary(pca_knn)$importance[3,]
+which(var_acum_knn >= 0.80)
+```
+
+Observem que a partir la PC9 ja n'obtenim el 80% i si només prenem 3 components principals en tenim un 40%. Primer mirem amb 9 components principals, on reduïm una mica la dimensionalitat del nostre problema.
+
+```{r, warning=FALSE, fig.width=10, fig.height=6}
+num_comp_knn <- 9
+x_knn_pca_train <- data.frame(pca_knn$x[,1:num_comp_knn])
+x_knn_pca_test <- data.frame(predict(pca_knn, newdata = x_knn_test)[, 1:num_comp_knn])
+
+acc_knn_pca <- c()
+k <- seq(1, 21, by = 2)
+j <- 1
+resultats_knn_pca <- list()
+for(i in k) {
+  set.seed(123)
+  pred_opt_knn_pca <- knn(train = x_knn_pca_train, test = x_knn_pca_test, 
+                          cl = y_knn_train, k = i)
+  cm_knn_pca <- confusionMatrix(pred_opt_knn_pca, as.factor(y_knn_test), 
+                                mode = "prec_recall")
+  acc_knn_pca[j] <- cm_knn_pca$overall["Accuracy"]
+  macro_F1_knn_pca <- mean(cm_knn_pca$byClass[,"F1"], na.rm = TRUE)
+  resultats_knn_pca[[paste0("k=", i)]] <- macro_F1_knn_pca
+  j <- j+1
+}
+
+
+plot(k, acc_knn_pca, type = "b", col = "blue", xlab = "k", ylab = "Accuracy")
+plot(k, resultats_knn_pca, type = "b", col = "blue", xlab = "k", ylab = "F1-macro")
+
+# Si triem el millor per F1-score:
+names(resultats_knn_pca)[which.max(unlist(resultats_knn_pca))]
+max(unlist(resultats_knn_pca))
+
+set.seed(123)
+pred_knn_pca_best <- knn(train = x_knn_pca_train, test = x_knn_pca_test, 
+                         cl = y_knn_train, k = 13)
+
+# Avaluació
+
+knn_pca_conf_mat_best <- confusionMatrix(pred_knn_pca_best, as.factor(y_knn_test), 
+                                         mode = "prec_recall")
+
+# F1-score per classe:
+knn_pca_conf_mat_best$byClass[,"F1"]
+ 
+# F1-macro
+mean(knn_pca_conf_mat_best$byClass[,"F1"], na.rm = TRUE)
+
+# VPP = valor predictiu positiu
+knn_pca_conf_mat_best$byClass[,"Precision"]
+
+# Recall
+knn_pca_conf_mat_best$byClass[, "Recall"]
+
+
+# Accuracy
+knn_pca_conf_mat_best$overall["Accuracy"]
+
+```
+
+Ara ho calculem per les 3 primeres components principals.
+
+```{r, warning=FALSE, fig.width=10, fig.height=6}
+num_comp_knn3 <- 3
+x_knn_pca3_train <- data.frame(pca_knn$x[,1:num_comp_knn3])
+
+# transformem el test usant PCA entrenat
+x_knn_pca3_test <- data.frame(predict(pca_knn, newdata = x_knn_test)[, 1:num_comp_knn3])
+
+acc_knn_pca3 <- c()
+k <- seq(1, 21, by = 2)
+j <- 1
+resultats_knn_pca3 <- list()
+for(i in k) {
+  set.seed(123)
+  pred_opt_knn_pca3 <- knn(train = x_knn_pca3_train, test = x_knn_pca3_test, 
+                           cl = y_knn_train, k = i)
+  cm_knn_pca3 <- confusionMatrix(pred_opt_knn_pca3, as.factor(y_knn_test), 
+                                 mode = "prec_recall")
+  acc_knn_pca3[j] <- cm_knn_pca3$overall["Accuracy"]
+  macro_F1_knn_pca3 <- mean(cm_knn_pca3$byClass[,"F1"], na.rm = TRUE)
+  resultats_knn_pca3[[paste0("k=", i)]] <- macro_F1_knn_pca3
+  j <- j+1
+}
+
+plot(k, acc_knn_pca3, type = "b", col = "blue", xlab = "k", ylab = "Accuracy")
+plot(k, resultats_knn_pca3, type = "b", col = "blue", xlab = "k", ylab = "F1-macro")
+
+# Si triem el millor per F1-score:
+names(resultats_knn_pca3)[which.max(unlist(resultats_knn_pca3))]
+max(unlist(resultats_knn_pca3))
+```
+
+```{r}
+set.seed(123)
+pred_knn_pca3_best <- knn(train = x_knn_pca3_train, test = x_knn_pca3_test, 
+                         cl = y_knn_train, k = 19)
+
+# Avaluació
+
+knn_pca3_conf_mat_best <- confusionMatrix(pred_knn_pca3_best, as.factor(y_knn_test), 
+                                         mode = "prec_recall")
+
+# F1-score per classe:
+knn_pca3_conf_mat_best$byClass[,"F1"]
+ 
+# F1-macro
+mean(knn_pca3_conf_mat_best$byClass[,"F1"], na.rm = TRUE)
+
+# VPP = valor predictiu positiu
+knn_pca3_conf_mat_best$byClass[,"Precision"]
+
+# Recall
+knn_pca3_conf_mat_best$byClass[, "Recall"]
+
+# Accuracy
+knn_pca3_conf_mat_best$overall["Accuracy"]
+```
+
+
+Ja veiem que obtenim resultats més fluixos que agafant 9 components principals i igualment, també hem vist amb aquests resultats que tampoc es millorava el primer resultat inicial.
+
+El següent pas és mirar si amb aquests primers resultats, realment són millors que fer-ho a l'atzar, és a dir, anem a trobar una línia de referència.
+
+## Línia de referència (Baseline)
+
+Un cop tenim les dades ja creades per haver-les aplicat al model *k-NN*, ens serveix per calcular una línia de referència per veure si el rendiment que estem obtenim és l'adequat pel nostre estudi. Ho calculem respecte la mètrica F1-macro, sempre predint la classe majoritària, la classe 1.
+
+```{r}
+
+baseline_knn   <- factor(rep(names(which.max(table(y_knn_test))), length(y_knn_test)), 
+                         levels = levels(factor(y_knn_test)))
+# Matriu de confusió del classificador trivial
+conf_baseline_knn <- confusionMatrix(baseline_knn, factor(y_knn_test), mode = "prec_recall")
+
+# Obtenim baseline multiclasse real: és a dir, inclou totes les 4 classes. 
+F1_class_majoritaria_knn  <- conf_baseline_knn$byClass["Class: 1",  "F1"]
+baseline_F1_macro_knn  <- F1_class_majoritaria_knn / length(levels(factor(y_knn_test)))
+baseline_F1_macro_knn
+```
+
+Veiem que el nostre F1-macro del model *k-NN* és clarament superior a aquesta línia de referència, per tant, podem seguir estudiant si millorem els nostres resultats inicials.
+
+## Naive Bayes
+
+Per aquest model únicament tenim en compte que les probabilitats no afectin si són 0, de manera que dins de la funció *naiveBayes()* utilitzem el paràmetre $laplace = 1$. Vegem-ho:
+
+```{r}
+nb_coh <- copy(cohort)
+# Hem de tenir la v. objectiu com a factor, multiclasse de 4
+nb_coh[, Dx_4cat := factor(Dx_4cat)]
+
+# Cjnt. d'entrenament i test
+nb_train <- nb_coh[train_coh,]
+nb_test  <- nb_coh[-train_coh,]
+
+# Entrenament
+
+nb_model   <- naiveBayes(Dx_4cat ~ .,
+                         data = nb_train,
+                         laplace = 1)
+
+# Predicció
+
+nb_pred      <- predict(nb_model, newdata = nb_test)
+prob_nb_4cat <- predict(nb_model, newdata = nb_test, type = "raw") # Probabilitats
+
+# Avaluació
+
+nb_cm     <- confusionMatrix(nb_pred, nb_test$Dx_4cat, mode = "prec_recall")
+
+# F1-score
+nb_cm$byClass[, "F1"]
+
+# F1-macro
+mean(nb_cm$byClass[, "F1"], na.rm = TRUE)   
+
+# VPP
+nb_cm$byClass[,"Precision"]
+
+# Recall
+nb_cm$byClass[,"Recall"]
+
+
+# Accuracy
+nb_cm$overall["Accuracy"]   
+  
+```
+
+## Random Forest
+
+Per tal d'aconseguir el millor rendiment per aquest model, ajustem els hiperparàmetres *mtry* i *nodesize* i a més, com que tenim les dades desbalancejades, provem diferents pesos a les nostres classes per tal que no afavoreixi en excès la classe majoritària. Per aquest darrere motiu utilitzem la funció *ranger()* per entrenar aquest model.
+
+```{r}
+rf_coh <- copy(cohort)
+rf_coh[, Dx_4cat := factor(Dx_4cat)]
+
+# Cjnt. d'entrenament i test
+rf_coh_train <- rf_coh[train_coh,]
+rf_coh_test  <- rf_coh[-train_coh,]
+
+# Entrenament
+
+rf_coh_freq <- table(rf_coh_train[,Dx_4cat])
+rf_coh_freq
+
+pesos_coh <- list(
+  rf_coh_pond_null = NULL,
+  rf_coh_pond      = max(rf_coh_freq) / rf_coh_freq,         
+  rf_coh_pond_sqrt = sqrt(max(rf_coh_freq) / rf_coh_freq),   
+  rf_coh_pond_pow  = (max(rf_coh_freq) / rf_coh_freq) ^1.5   
+)
+
+nodes <- c(1,3,5,10)
+mtry  <- c(2,4,6)
+resultats_coh <- list()
+
+for(m in mtry){
+  for( n in nodes){
+    for ( w in names(pesos_coh)) {
+      rf_coh_model <- ranger(Dx_4cat ~ . ,
+                             data = rf_coh_train,
+                             num.trees = 500,               
+                             mtry = m,  
+                             min.node.size = n,
+                             class.weights = pesos_coh[[w]],       
+                             seed = 123)
+     
+      # Predicció
+      rf_coh_pred <- predict(rf_coh_model, data = rf_coh_test)$predictions
+      # Avaluació
+      rf_coh_conf_mat <- confusionMatrix(rf_coh_pred, rf_coh_test[, Dx_4cat], 
+                                         mode = "prec_recall")
+      
+      rf_coh_macro_F1 <- mean(rf_coh_conf_mat$byClass[,"F1"], na.rm = TRUE)
+
+      resultats_coh[[paste0("min.node.size=", n," pesos=",w," mtry=", m)]]<-rf_coh_macro_F1
+    }
+  }
+}
+
+```
+
+```{r}
+names(resultats_coh)[which.max(unlist(resultats_coh))] 
+max(unlist(resultats_coh))
+```
+
+Els resultats amb una taula sòlida i interpretable:
+
+```{r}
+res_rf_4cat <- data.table(
+  config = names(resultats_coh),
+  F1_macro = as.numeric(resultats_coh)
+) 
+
+res_rf_4cat[, c("nodesize", "pesos", "mtry") := 
+              tstrsplit(config, " ", fixed = TRUE)]
+res_rf_4cat[, nodesize := as.integer(gsub("min.node.size=", "", nodesize))]
+res_rf_4cat[, pesos := gsub("pesos=", "", pesos)]
+res_rf_4cat[, mtry := as.integer(gsub("mtry=", "", mtry))]
+
+setcolorder(res_rf_4cat, c("nodesize", "pesos", "mtry", "F1_macro"))
+res_rf_4cat[, config := NULL]
+res_rf_4cat[pesos == "rf_coh_pond_null", pesos := "nul"]
+res_rf_4cat[pesos == "rf_coh_pond", pesos := "estandard"]
+res_rf_4cat[pesos == "rf_coh_pond_sqrt", pesos := "suavitzada"]
+res_rf_4cat[pesos == "rf_coh_pond_pow", pesos := "amplificada"]
+```
+
+
+Els resultats que obtenim per aquest ajust que hem obtingut per optimitzar el rendiment, veiem que les dades queden de la següent manera:
+
+```{r}
+rf_coh_model_best <-  ranger(Dx_4cat ~ . ,
+                            data = rf_coh_train,
+                            num.trees = 500,
+                            mtry = 2,
+                            min.node.size = 1,
+                            class.weights = NULL,
+                            probability = TRUE,
+                            seed = 123)
+
+# Predicció
+# rf_coh_pred_best <- predict(rf_coh_model_best, data = rf_coh_test)$predictions
+rf_coh_pred_best <- as.numeric(colnames(predict(
+                                 rf_coh_model_best, 
+                                 data = rf_coh_test, type="response")
+                                 $predictions)
+                               [max.col(predict(
+                                 rf_coh_model_best, 
+                                 data = rf_coh_test, type="response")
+                                 $predictions)])
+prob_rf_4cat     <- predict(rf_coh_model_best, data = rf_coh_test, 
+                            type = "response")$predictions
+
+# Avaluació
+
+rf_coh_conf_mat_best <- confusionMatrix(factor(rf_coh_pred_best, 
+                                               levels = c("1", "2", "3", "4")), 
+                                        rf_coh_test[, Dx_4cat], 
+                                        mode = "prec_recall")
+
+# F1-score per classe:
+rf_f1_classe  <- rf_coh_conf_mat_best$byClass[, "F1"]
+rf_f1_classe
+
+# F1-macro
+mean(rf_f1_classe, na.rm = TRUE)
+
+# VPP = valor predictiu positiu
+rf_coh_conf_mat_best$byClass[,"Precision"]
+
+# Recall
+rf_coh_conf_mat_best$byClass[,"Recall"]
+
+# Accuracy
+rf_coh_conf_mat_best$overall["Accuracy"]
+
+```
+```{r}
+# Per la importància de les variables
+rf_coh_imp_var <-  ranger(Dx_4cat ~ . ,
+                            data = rf_coh_train,
+                            num.trees = 500,
+                            mtry = 2,
+                            min.node.size = 1,
+                            class.weights = NULL,
+                            probability = TRUE,
+                            seed = 123,
+                          importance = "impurity")
+sort(rf_coh_imp_var$variable.importance, decreasing = TRUE)
+```
+```{r}
+# Visualització de la importància
+ggplot(rf_coh_imp_var$variable.importance %>%
+  enframe(name = "variable", value = "importance") %>%
+  arrange(desc(importance))
+  , aes(x = reorder(variable, importance), y = importance)) +
+  geom_col(fill = "skyblue") +
+  coord_flip() +
+  labs(
+    title = "Importància de variables diagnòstic multiclasse",
+    x = "Variable",
+    y = "Importància"
+  )
+```
+
+
+
+
+
+## Support Vector Machine (SVM)
+
+Per obtenir el millor rendiment amb les nostres dades amb aquest model, provarem els ajustos dels hiperparàmetres *kernel* (*linear, polynomial i radial*) i *cost*.
+
+```{r}
+svm_coh <- copy(cohort)
+svm_coh[, Dx_4cat := factor(Dx_4cat)]
+
+# Cjnt. entrenament + test
+svm_train <- svm_coh[train_coh,]
+svm_test  <- svm_coh[-train_coh]
+
+# Entrenament
+
+svm_coh_kernel  <- c("linear", "polynomial", "radial")
+svm_coh_costs   <- c(0.1, 1, 10)
+svm_coh_results <- list()
+
+set.seed(123)
+
+for(k in svm_coh_kernel){
+  for(c in svm_coh_costs){
+    svm_coh_model <- svm(x = svm_train[, !c("Dx_4cat")],
+                          y = svm_train$Dx_4cat,
+                          kernel = k,
+                          cost = c,
+                          scale = TRUE)
+    svm_coh_pred  <- predict(svm_coh_model, newdata = svm_test[, !c("Dx_4cat")])
+    # svm_coh_pred  <- predict(svm_coh_model, newdata = svm_test)
+    
+    svm_coh_cm    <- confusionMatrix(svm_coh_pred,
+                                     svm_test$Dx_4cat,
+                                     mode = "prec_recall")
+    
+    svm_coh_results[[paste(k, c, sep = "_")]] <- data.frame(kernel = k,
+                                                          cost = c,
+                                             Precisio = svm_coh_cm$byClass[,"Precision"],
+                                             Recall   = svm_coh_cm$byClass[,"Recall"],
+                                             F1       = svm_coh_cm$byClass[,"F1"],
+                                             Accuracy = svm_coh_cm$overall["Accuracy"])
+  }
+  
+}
+
+
+```
+
+El que té Accuracy més alt és *linear_1*, és a dir, amb kernel=linear i cost=1:
+
+| Classe | Precisió | Recall | F1  | Accuracy |
+|--------|----------|--------|-----|----------|
+| 1      |  0.5988701        | 0.8060837       |  0.6871961   |     0.5935252     |
+| 2      |  0.5974843        |0.5722892        | 0.5846154    |   0.5935252       |
+| 3      |  0.5348837        |   0.1965812     |  0.2875000   |    0.5935252      |
+| 4      |   NA       |   0.0000000     | NA    |    0.5935252      |
+
+   
+
+Entrenem el model amb el *kernel = linear* i *cost=1*:
+
+```{r}
+svm_coh_model_best <- svm(x = svm_train[, !c("Dx_4cat")],
+                          y = svm_train$Dx_4cat,
+                          kernel = "linear",
+                          cost = 1,
+                          probability = TRUE,
+                          scale = TRUE)
+svm_pred           <- predict(svm_coh_model_best, newdata = svm_test[, !c("Dx_4cat")],
+                              probability = TRUE)
+prob_svm_4cat      <- attr(svm_pred, "probabilities")
+svm_cm             <- confusionMatrix(svm_pred,
+                                      svm_test$Dx_4cat,
+                                      mode = "prec_recall")
+
+svm_cm$byClass[, c("F1", "Precision", "Recall")]
+# F1-macro
+mean(svm_cm$byClass[, "F1"], na.rm = TRUE)
+
+# Accuracy
+svm_cm$overall["Accuracy"]
+```
+
+
+
+
+# Resultats pel problema multiclasse
+
+Un cop tenim els resultats per cada model, els posem en comú fent servir el resultat amb millor rendiment que hem trobat en cada cas amb la mètrica *F1-macro*:
+
+```{r}
+res_4cat <- data.frame(
+  model = c("kNN", "NB", "RF", "SVM", "Baseline"),
+  f1macro = c(mean(knn_conf_mat_best$byClass[,"F1"], na.rm = TRUE),
+               mean(nb_cm$byClass[, "F1"], na.rm = TRUE),
+               mean(rf_f1_classe, na.rm = TRUE),
+               mean(svm_cm$byClass[, "F1"], na.rm = TRUE),
+               baseline_F1_macro_knn
+               )
+)
+```
+
+```{r, fig.width=10, fig.height=6}
+ggplot(res_4cat, aes(x = reorder(model, f1macro), y = f1macro, fill = model)) +
+  geom_col(width = 0.6) + 
+  geom_text(aes(label = round(f1macro, 3)), vjust = -0.5) +
+  theme_minimal() +
+  theme(legend.position = "none") +
+  labs(
+    title = "F1-macro entre models",
+    x = "Model",
+    y = "F1-macro"
+  )
+```
+
+
+
+Obtenim que el millor resultat és amb el model *Random Forest*. 

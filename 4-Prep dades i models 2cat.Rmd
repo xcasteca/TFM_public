@@ -1,0 +1,518 @@
+---
+title: "Prepdata2cat"
+output: html_document
+---
+
+# Preparació de les dades pel problema binari
+
+Per preparar les dades per fer l'anàlisi de dues classes, ens nodrim de la preparació de dades que s'ha fet anteriorment per les 4 classes i creem una nova variable *Dx_2cat* que deriva de la variable *Dx_4cat* del nostre conjunt de dades *cohort*, on distingim si el pacient té el diagnòstic d'ictus isquèmic LVO o no.
+
+```{r}
+data   <- copy(cohort)
+# Dx_2cat on 1 és LVO i 0 no LVO
+data[, Dx_2cat := as.integer(Dx_4cat == 1)]
+data[, .N, by = Dx_4cat]
+data[, .N, by = Dx_2cat]
+
+vars_pred_data <- copy(vars_pred_coh)
+```
+
+```{r}
+# Balanceig
+nrow(data[Dx_2cat==1])/nrow(data)*100 
+nrow(data[Dx_2cat==0])/nrow(data)*100      
+```
+
+Veiem que les nostres dades queden balancejades. Ara ja estem en disposició d'aplicar els models. Farem servir la mateixa partició per crear els conjunts de dades d'entrenament i de test que hem utilitzat per l'estudi de la variable objectiu de 4 classes.
+
+Afegim més informació al data per tal de fer una descriptiva del dataset final.
+
+```{r}
+data12 <- copy(cohort12)
+data12[, Dx_2cat := as.integer(Dx_4cat == 1)]
+data12[, .N, by = Dx_4cat]
+data12[, .N, by = Dx_2cat]
+
+data12[, Dx_2cat := factor(Dx_2cat, levels = c("0", "1"))]
+```
+
+```{r}
+desc_resp_2cat <- createTable(compareGroups(~ Dx_2cat, data = data12))
+desc_resp_2cat$descr[,1]
+desc_clas_2cat <- createTable(compareGroups(Dx_2cat ~ . - dataset - Dx_4cat, data = data12), show.p.overall = FALSE)
+desc_data_2cat <- createTable(compareGroups(dataset ~ . - Dx_4cat, data = data12), show.p.overall = FALSE)
+```
+
+
+## Escala RACE, la nostra línia de referència
+
+La nostra línia de referència és el càlcul de les dades que tenim del rendiment de l'escala RACE aplicades a les nostres observacions. Ho fem a travès del càlcul de les dades que tenim i declarant al diagnòstic LVO com a classe positiva. Anem a veure-ho:
+
+```{r}
+race_data <- copy(data)
+race_data[, RACE_LVO := as.integer(ESCALA_RACE >= 5)]
+race_data[, RACE_LVO := factor(RACE_LVO, levels = c(0,1))]
+race_data[, Dx_2cat := factor(Dx_2cat, levels = c(0,1))]
+race_cm  <- confusionMatrix(race_data$RACE_LVO, 
+                            race_data$Dx_2cat, 
+                            mode = "prec_recall", 
+                            positive = "1")
+race_cm$byClass[c("F1", "Precision", "Recall")]
+race_cm$overall["Accuracy"] 
+```
+
+# Aplicació models al problema binari
+
+## k-NN, veïns pròxims
+
+Per ajustar aquest model normalitzem les variables i provem si l'anàlisis de components principals (PCA) ens ajuda a millorar el rendiment. També en tots els casos escollim el paràmetre *k* més òptim.
+
+```{r, fig.width=10, fig.height=6}
+knn_data <- copy(data)
+knn_2cat_y <- knn_data$Dx_2cat
+knn_data <- knn_data[, .SD, .SDcols = vars_pred_data]
+data.table::setDT(knn_data)
+
+normalize  <- function(x){
+  return( (x - min(x)) / (max(x) - min(x)) )
+}
+
+vars_pred_norm_knn_2cat <- c("EDAT", "ESCALA_RACE", "TAS", "TAD", "GLIC", 
+                             "diff_hora_seg","Hora_sin", "Hora_cos")
+knn_data[, (vars_pred_norm_knn_2cat) := lapply(.SD, normalize), 
+         .SDcols = vars_pred_norm_knn_2cat ]
+knn_2cat_x <- copy(knn_data)
+
+# Cjnt. entrenament
+x_knn_2cat_train <- knn_2cat_x[train_coh,]
+y_knn_2cat_train <- knn_2cat_y[train_coh]
+
+# Cjnt. test
+x_knn_2cat_test  <- knn_2cat_x[-train_coh,]
+y_knn_2cat_test  <- knn_2cat_y[-train_coh]
+
+acc_knn_2cat        <- c()
+k <- seq(1, 21, by = 2)
+j <- 1
+resultats_knn_2cat  <- list()
+resultat_knn_2cat_acc <- list()
+for(i in k) {
+  set.seed(123)
+  pred_opt_knn_2cat <- knn(train = x_knn_2cat_train, 
+                           test = x_knn_2cat_test, 
+                           cl = y_knn_2cat_train, 
+                           k = i)
+  cm_knn_2cat <- confusionMatrix(pred_opt_knn_2cat, as.factor(y_knn_2cat_test),
+                                 mode = "prec_recall", positive = "1")
+  acc_knn_2cat[j] <- cm_knn_2cat$overall["Accuracy"]
+  resultat_knn_2cat_acc[[paste("k=", i)]] <- acc_knn_2cat[j]
+  macro_F1_knn_2cat <- mean(cm_knn_2cat$byClass["F1"], na.rm = TRUE)
+  resultats_knn_2cat[[paste0("k=", i)]] <- macro_F1_knn_2cat
+  j <- j+1
+}
+
+plot(k, acc_knn_2cat, type = "b", col = "blue", xlab = "k", ylab = "Accuracy")   
+plot(k, resultats_knn_2cat, type = "b", col = "blue", xlab = "k", ylab = "F1-macro")
+
+# Si triem el millor per Accuracy:
+names(resultat_knn_2cat_acc)[which.max(unlist(resultat_knn_2cat_acc))] 
+max(unlist(resultat_knn_2cat_acc))
+set.seed(123)
+pred_knn_best_2cat <- knn(train = x_knn_2cat_train, test = x_knn_2cat_test, 
+                          cl = y_knn_2cat_train, k = 21, prob = TRUE)
+knn_conf_mat_best_2cat <- confusionMatrix(pred_knn_best_2cat, 
+                                          as.factor(y_knn_2cat_test), 
+                                          mode = "prec_recall", positive = "1")
+
+
+# F1 | VPP = valor predictiu positiu | Recall
+knn_conf_mat_best_2cat$byClass[c("F1", "Precision", "Recall")]
+
+# Accuracy
+knn_conf_mat_best_2cat$overall["Accuracy"]
+```
+
+Ara provem fent ús de la PCA seguint el mateix procés, amb el mateix conjunt d'entrenament i de test, a veure quins resultats trobem.
+
+```{r}
+pca_knn_2cat <- prcomp(x_knn_2cat_train, center = TRUE, scale. = TRUE) 
+```
+
+Veiem quanta variància explica cada component.
+
+```{r}
+summary(pca_knn_2cat)
+screeplot(pca_knn_2cat, type = "lines")
+```
+
+Escollim les components principals que tenen més variància acumulada, que expliquin un 80%.
+
+```{r}
+var_acum_knn <- summary(pca_knn_2cat)$importance[3,]
+which(var_acum_knn >= 0.80) 
+```
+
+Observem que a partir la PC9 ja n'obtenim el 80% i si només prenem 3 components principals en tenim un 40%. Primer mirem amb 9 components principals, on reduïm una mica la dimensionalitat del nostre problema.
+
+```{r}
+num_comp_knn_2cat <- 9
+x_knn_2cat_pca_train <- data.frame(pca_knn_2cat$x[,1:num_comp_knn_2cat])
+
+# transformem el test usant PCA entrenat
+x_knn_2cat_pca_test <- data.frame(predict(pca_knn_2cat, newdata = x_knn_2cat_test)
+                                  [, 1:num_comp_knn_2cat])
+```
+
+Entrenem el model:
+
+```{r, fig.width=10, fig.height=6}
+acc_knn_2cat_pca <- c()
+k <- seq(1, 21, by = 2)
+j <- 1
+resultats_knn_2cat_pca <- list()
+resultats_knn_2cat_pca_acc <- list()
+for(i in k) {
+  set.seed(123)
+  pred_opt_knn_2cat_pca <- knn(train = x_knn_2cat_pca_train, test = x_knn_2cat_pca_test, cl = y_knn_2cat_train, k = i)
+  cm_knn_2cat_pca <- confusionMatrix(pred_opt_knn_2cat_pca, as.factor(y_knn_2cat_test), mode = "prec_recall", positive = "1")
+  acc_knn_2cat_pca[j] <- cm_knn_2cat_pca$overall["Accuracy"]
+  resultats_knn_2cat_pca_acc[[paste0("k=", i)]] <- acc_knn_2cat_pca[j]
+  macro_F1_knn_2cat_pca <- mean(cm_knn_2cat_pca$byClass["F1"], na.rm = TRUE)
+  resultats_knn_2cat_pca[[paste0("k=", i)]] <- macro_F1_knn_2cat_pca
+  j <- j+1
+}
+
+plot(k, acc_knn_2cat_pca, type = "b", col = "blue", xlab = "k", ylab = "Accuracy")   
+plot(k, resultats_knn_2cat_pca, type = "b", col = "blue", xlab = "k", ylab = "F1-macro")
+```
+
+Veiem com queden els resultats triant el valor $k=15$ com a òptim.
+
+```{r}
+# Si triem el millor per Accuracy:
+names(resultats_knn_2cat_pca_acc)[which.max(unlist(resultats_knn_2cat_pca_acc))] 
+max(unlist(resultats_knn_2cat_pca_acc))
+
+set.seed(123)
+pred_knn_2cat_pca_best <- knn(train = x_knn_2cat_pca_train, 
+                              test = x_knn_2cat_pca_test, 
+                              cl = y_knn_2cat_train, 
+                              k = 15)
+
+# Avaluem el model
+knn_2cat_pca_conf_mat_best <- confusionMatrix(pred_knn_2cat_pca_best, 
+                                              as.factor(y_knn_2cat_test), 
+                                              mode = "prec_recall", 
+                                              positive = "1")
+knn_2cat_pca_conf_mat_best
+
+
+# F1 | VPP | Recall
+knn_2cat_pca_conf_mat_best$byClass[c("F1", "Precision", "Recall")]
+
+# Accuracy
+knn_2cat_pca_conf_mat_best$overall["Accuracy"]
+```
+
+Ara, provem prenent només les 3 primeres components principals, que representen un 40%.
+
+```{r, fig.width=10, fig.height=6}
+num_comp_knn3_2cat <- 3
+x_knn_2cat_pca3_train <- data.frame(pca_knn_2cat$x[,1:num_comp_knn3_2cat])
+
+# transformem el test usant PCA entrenat
+x_knn_2cat_pca3_test <- data.frame(predict(pca_knn_2cat, newdata = x_knn_2cat_test)
+                                   [, 1:num_comp_knn3_2cat])
+
+acc_knn_2cat_pca3 <- c()
+k <- seq(1, 21, by = 2)
+j <- 1
+resultats_knn_2cat_pca3 <- list()
+resultats_knn_2cat_pca3_acc <- list()
+for(i in k) {
+  set.seed(123)
+  pred_opt_knn_2cat_pca3 <- knn(train = x_knn_2cat_pca3_train, test = x_knn_2cat_pca3_test, 
+                                cl = y_knn_2cat_train, k = i)
+  cm_knn_2cat_pca3 <- confusionMatrix(pred_opt_knn_2cat_pca3, 
+                                      as.factor(y_knn_2cat_test), 
+                                      mode = "prec_recall", positive = "1")
+  acc_knn_2cat_pca3[j] <- cm_knn_2cat_pca3$overall["Accuracy"]
+  resultats_knn_2cat_pca3_acc[[paste0("k=", i)]] <- acc_knn_2cat_pca3[j]
+  macro_F1_knn_2cat_pca3 <- mean(cm_knn_2cat_pca3$byClass["F1"], na.rm = TRUE)
+  resultats_knn_2cat_pca3[[paste0("k=", i)]] <- macro_F1_knn_2cat_pca3
+  j <- j+1
+}
+
+plot(k, acc_knn_2cat_pca3, type = "b", col = "blue", xlab = "k", ylab = "Accuracy")   
+plot(k, resultats_knn_2cat_pca3, type = "b", col = "blue", xlab = "k", ylab = "F1-macro")
+
+# Si triem el millor per Accuracy:
+names(resultats_knn_2cat_pca3_acc)[which.max(unlist(resultats_knn_2cat_pca3_acc))] 
+max(unlist(resultats_knn_2cat_pca3_acc))
+
+```
+
+Veiem com queden els resutlats finals amb el valor k òptim, 7.
+
+```{r}
+set.seed(123)
+pred_knn_2cat_pca3_best <- knn(train = x_knn_2cat_pca3_train, 
+                               test = x_knn_2cat_pca3_test, 
+                               cl = y_knn_2cat_train, k = 7)
+
+
+knn_2cat_pca3_conf_mat_best <- confusionMatrix(pred_knn_2cat_pca3_best, 
+                                               as.factor(y_knn_2cat_test), 
+                                               mode = "prec_recall", 
+                                               positive = "1")
+
+
+
+knn_2cat_pca3_conf_mat_best$byClass[c("F1", "Precision", "Recall")]
+
+# Accuracy
+knn_2cat_pca3_conf_mat_best$overall["Accuracy"]
+```
+
+Amb aquests resultats observem que al escollir les variables predictores més influents i evitar-ne les més correlacionades, no ha ajudat a millorar-ne el rendiment. Per tant, obtenim uns millors resultats aplicant *knn* únicament.
+
+## Naive Bayes
+
+Per aquest model únicament tenim en compte que les probabilitats no afectin si són 0, de maenra que dins de la funció *naiveBayes()* utilitzem el paràmetre $laplace = 1$. Vegem-ho:
+
+```{r}
+nb_data <- copy(data)
+nb_data_y <- factor(nb_data[, Dx_2cat])
+nb_data_x <- nb_data[, .SD, .SDcols = vars_pred_data]
+
+# Cjnt. entrenament
+nb_data_train_x <- nb_data_x[train_coh,]
+nb_data_train_y <- nb_data_y[train_coh]
+# Cjnt. test
+nb_data_test_x  <- nb_data_x[-train_coh,]
+nb_data_test_y  <- nb_data_y[-train_coh]
+
+nb_data_model   <- naiveBayes(x = nb_data_train_x,
+                              y = nb_data_train_y,
+                              laplace = 1)
+
+nb_data_pred   <- predict(nb_data_model, newdata = nb_data_test_x)
+nb_data_prob   <- predict(nb_data_model, newdata = nb_data_test_x, type = "raw")
+
+nb_data_cm     <- confusionMatrix(factor(nb_data_pred, levels = c("0", "1")), 
+                                  factor(nb_data_test_y, levels = c("0", "1")), 
+                                  mode = "prec_recall",
+                                  positive = "1")
+
+
+nb_data_cm$byClass[c("F1", "Precision", "Recall")]
+# Accuracy
+nb_data_cm$overall["Accuracy"]   
+```
+
+Obtenim una precisió del 0.64.
+
+## Random Forest
+
+Per tal d'aconseguir el millor rendiment per aquest model, ajustem els hiperparàmetres *mtry* i *nodesize*. A més, com que tenim les dades balancejades, en aquí no ens fa falta ponderar-les tal com hem fet amb el problema de 4 classes a la variable objectiu, i per això utilitzem *randomForest()*.
+
+```{r}
+rf_data <- copy(data)
+rf_data_y <- factor(rf_data[, Dx_2cat])
+rf_data_x <- rf_data[, .SD, .SDcols = vars_pred_data]
+
+rf_data_train_x <- rf_data_x[train_coh,]
+rf_data_train_y  <- rf_data_y[train_coh]
+
+rf_data_test_x  <- rf_data_x[-train_coh,]
+rf_data_test_y  <- rf_data_y[-train_coh]
+
+rf_data_results    <- list()
+rf_data_nodes      <- c(1,3,5,15)
+rf_data_mtry       <- c(2,4,6)
+rf_acc_best        <- -Inf
+rf_data_model_best <- NULL
+
+
+set.seed(123)
+for(m in rf_data_mtry){
+  for(n in rf_data_nodes){
+    rf_data_model  <- randomForest( x = rf_data_train_x,
+                                    y = rf_data_train_y,
+                                    ntree = 500,
+                                    mtry = m,
+                                    nodesize = n)
+    rf_data_pred   <- predict(rf_data_model, rf_data_test_x)
+    rf_data_prob   <- predict(rf_data_model, rf_data_test_x, type = "prob")
+    
+    rf_data_cm     <- confusionMatrix(factor(rf_data_pred, levels = c("0", "1")),
+                                      factor(rf_data_test_y, levels = c("0", "1")),
+                                      mode = "prec_recall",
+                                      positive = "1")
+    acc <- rf_data_cm$overall["Accuracy"]
+    rf_data_results[[paste(m,n, sep = "_")]] <- data.frame(mtry = m,
+                                                           nodesize = n,
+                                            Precision = rf_data_cm$byClass["Precision"],
+                                            Recall   = rf_data_cm$byClass["Recall"],
+                                            F1       = rf_data_cm$byClass["F1"],
+                                            Accuracy = acc)
+    if(acc > rf_acc_best){
+      rf_acc_best <- acc
+      rf_data_model_best <- rf_data_model
+      rf_data_pred_best  <- rf_data_pred
+      rf_2cat_prob_best  <- rf_data_prob
+      rf_data_cm_best    <- rf_data_cm
+
+    }
+  }
+}
+```
+
+| mtry | nodesize | Precision | Recall | F1  | Accuracy |
+|------|----------|-----------|--------|-----|----------|
+|  4    |    15      |    0.6969697       | 0.5247148       |  0.5986985   |  0.6672662        |
+
+Ens quedem amb aquells resultats que tinguin *Accuracy* més alt.
+
+```{r, include = FALSE}
+# F1 | VPP = valor predictiu positiu | Recall
+rf_data_cm_best$byClass[c("F1", "Precision", "Recall")]
+
+# Accuracy
+rf_data_cm_best$overall["Accuracy"]
+```
+
+Fem la visualització de les variables de nivell de més importància
+```{r}
+ggplot(importance(rf_data_model_best) %>%
+  enframe(name = "variable", value = "importance") %>%
+  arrange(desc(importance))
+  , aes(x = reorder(variable, importance), y = importance)) +
+  geom_col(fill = "skyblue") +
+  coord_flip() +
+  labs(
+    title = "Importància de variables diagnòstic binari",
+    x = "Variable",
+    y = "Importància"
+  )
+```
+
+
+## Support Vector Machine (SVM)
+
+Per obtenir el millor rendiment amb les nostres dades amb aquest model, provarem els ajustos dels hiperparàmetres *kernel* (*linear, polynomial i radial*) i *cost*.
+
+```{r}
+svm_data <- copy(data)
+svm_data_y <- factor(svm_data[, Dx_2cat])
+svm_data_x <- svm_data[, .SD, .SDcols = vars_pred_data]
+
+# Cjnt. entrenament
+svm_data_train_x <- svm_data_x[train_coh,]
+svm_data_train_y <- svm_data_y[train_coh]
+
+# Cjnt. test
+svm_data_test_x  <- svm_data_x[-train_coh,]
+svm_data_test_y  <- svm_data_y[-train_coh]
+
+svm_data_kernel  <- c("linear", "polynomial", "radial")
+svm_data_costs   <- c(0.1, 1, 10)
+svm_data_results <- list()
+svm_acc_best        <- -Inf
+svm_data_model_best <- NULL
+
+set.seed(123)
+
+for(k in svm_data_kernel){
+  for(c in svm_data_costs){
+    svm_data_model <- svm(x = svm_data_train_x,
+                          y = svm_data_train_y,
+                          kernel = k,
+                          cost = c,
+                          scale = TRUE,
+                          probability = TRUE)
+    svm_data_pred  <- predict(svm_data_model, newdata = svm_data_test_x)
+    svm_data_prob  <- attr(predict(svm_data_model, newdata = svm_data_test_x, 
+                                   probability = TRUE), "probabilities")
+
+    
+    svm_data_cm    <- confusionMatrix(factor(svm_data_pred, levels = c("0", "1")),
+                                      factor(svm_data_test_y, levels = c("0", "1")),
+                                      mode = "prec_recall",
+                                      positive = "1")
+    acc <- svm_data_cm$overall["Accuracy"]
+    svm_data_results[[paste(k, c, sep = "_")]] <- data.frame(kernel = k,
+                                                             cost = c,
+                                            Precisio = svm_data_cm$byClass["Precision"],
+                                            Recall   = svm_data_cm$byClass["Recall"],
+                                            F1       = svm_data_cm$byClass["F1"],
+                                            Accuracy = acc)
+    if(acc > svm_acc_best){
+      svm_acc_best <- acc
+      svm_data_model_best <- svm_data_model
+      svm_data_pred_best  <- svm_data_pred
+      svm_data_prob_best  <- svm_data_prob
+      svm_data_cm_best    <- svm_data_cm
+
+    }
+  }
+  
+}
+```
+
+```{r, include = FALSE}
+# F1 | VPP = valor predictiu positiu | Recall
+svm_data_cm_best$byClass[c("F1", "Precision", "Recall")]
+
+# Accuracy
+svm_data_cm_best$overall["Accuracy"]
+```
+
+Altra vegada, n'observem l'*Accuracy* més alt per tal de comparar-ne els resultats.
+
+| kernel | cost | Precisio | Recall    | F1        | Accuracy  |
+|--------|------|----------|-----------|-----------|-----------|
+| linear | 1    | 0.654321 | 0.6045627 | 0.6284585 | 0.6618705 |
+
+# Resultats pel problema binari
+
+Un cop tenim els resultats per cada model, els posem en comú fent servir el resultat amb millor rendiment que hem trobat en cada cas amb la mètrica *Accuracy*:
+
+```{r}
+res_bin <- data.frame(
+  model = c("kNN", "NB", "RF", "SVM", "RACE"),
+  accuracy = c(as.numeric(knn_conf_mat_best_2cat$overall["Accuracy"]),
+               as.numeric(nb_data_cm$overall["Accuracy"]),
+               0.6672662,
+               0.6618705,
+               as.numeric(race_cm$overall["Accuracy"] )
+               )
+)
+```
+```{r, fig.width=10, fig.height=6}
+ggplot(res_bin, aes(x = reorder(model, accuracy), y = accuracy, fill = model)) +
+  geom_col(width = 0.6) + 
+  geom_text(aes(label = round(accuracy, 3)), vjust = -0.5) +
+  theme_minimal() +
+  theme(legend.position = "none") +
+  labs(
+    title = "Accuracy entre models",
+    x = "Model",
+    y = "Accuracy"
+  )
+```
+
+```{r, include = FALSE}
+# ggplot(res_bin, aes(x = accuracy, y = reorder(model, accuracy))) +
+#   geom_point(size = 4, color = "steelblue") +
+#   geom_segment(aes(x = 0, xend = accuracy, y = model, yend = model),
+#                color = "grey70") +
+#   theme_minimal() +
+#   labs(
+#     title = "Accuracy entre models",
+#     x = "Accuracy",
+#     y = "Model"
+#   )
+```
+
+Obtenim que el millor resultat és amb el model *Random Forest* i, a més, en qualsevol model provat obtenim rendiments superiors als diagnòstics de l'escala RACE. 

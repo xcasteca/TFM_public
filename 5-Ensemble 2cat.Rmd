@@ -1,0 +1,465 @@
+---
+title: "ensemble_2cat"
+author: "Xènia Castellà"
+date: "2026-04-18"
+output: html_document
+---
+
+# Model ensemble pel problema binari
+
+En aquest apartat farem ús de variables construïdes amb els anàlisis anteriors i el nostre objectiu és millorar la mètrica **Accuracy**.
+
+## Vot majoritari
+
+Creem primer de tot una taula on tenim per cada observació del conjunt test, si cada model ha encertat o no. Aquesta taula ens ajudarà a veure si hi ha correlació d'errors entre models. 
+
+
+```{r}
+pred_2cat <- data.frame(
+  test = y_knn_2cat_test,
+  knn  = as.numeric(as.character(pred_knn_best_2cat)),
+  nb   = nb_data_pred,
+  rf   = as.numeric(as.character(rf_data_pred_best)),
+  svm  = as.numeric(as.character(svm_data_pred_best))
+)
+
+pred_2cat <- as.data.frame(lapply(pred_2cat, 
+                                  function(x) factor(x, levels = c("0", "1"))))
+
+# Vot majoritari
+vot_maj_2cat <- function(x){
+  if(sum(x == "1") >= sum(x == "0")) "1" else "0"
+}
+
+# Fer les prediccions d'ensemble
+pred_ens_maj_2cat <- apply(pred_2cat[2:5], 1, vot_maj_2cat)
+pred_ens_maj_2cat <- factor(pred_ens_maj_2cat, levels = c("0","1"))
+
+
+```
+
+Avaluem les prediccions d'ensemble:
+
+```{r}
+ens_2cat_cm <- confusionMatrix(
+  pred_ens_maj_2cat,
+  pred_2cat[,"test"],
+  mode = "prec_recall",
+  positive = "1"
+)
+
+ens_2cat_cm$byClass[c("Precision","Recall","F1")]
+ens_2cat_cm$overall["Accuracy"]
+
+```
+Fent el mateix anàlisi només comparant 2 o 3 models, només hi ha una lleugera millora amb l'accuracy = 0.6906 quan s'utilitzen els models k-NN i Random Forest:
+
+```{r}
+confusionMatrix(factor(apply(pred_2cat[, c("knn", "rf")], 1, vot_maj_2cat), 
+                       levels = c("0", "1")), pred_2cat[, "test"], 
+                mode = "prec_recall", positive = "1")
+```
+
+## Promig de probabilitats
+
+Prenem les probabilitats de classe 1 de cada model per fer-ne el promig i d'aquesta manera decidirem la classe final, aquella que tingui una probabilitat més alta. 
+
+Pel model *knn* és necessasri convertir les probabilitats que siguin de la classe 1. Per la resta de models calculem les probabilitats de la classe 0 i 1. 
+
+```{r}
+knn_2cat_prob <- attr(pred_knn_best_2cat, "prob")
+knn_2cat_prob <- ifelse(pred_knn_best_2cat == "1", knn_2cat_prob,
+                        1-knn_2cat_prob)
+nb_2cat_prob  <- nb_data_prob[, "1"]
+rf_2cat_prob  <- rf_2cat_prob_best[, "1"]
+svm_2cat_prob <- svm_data_prob_best[, "1"]
+```
+
+
+
+
+```{r}
+prob_2cat <- data.frame(
+  knn = knn_2cat_prob,
+  nb = nb_2cat_prob,
+  rf = rf_2cat_prob,
+  svm = svm_2cat_prob
+)
+prob_2cat_mean <- rowMeans(prob_2cat)
+
+# Convertir probabilitats a classes (llindar 0.5)
+pred_ens_prob_2cat <- ifelse(prob_2cat_mean >= 0.5, "1", "0")
+pred_ens_prob_2cat <- factor(pred_ens_prob_2cat, levels = c("0","1"))
+# Matriu de confusió i mètriques
+ens_2cat_prob_cm <- confusionMatrix(
+  pred_ens_prob_2cat,
+  pred_2cat$test,
+  mode = "prec_recall",
+  positive = "1"
+)
+
+ens_2cat_prob_cm$byClass[c("Precision","Recall","F1")]
+ens_2cat_prob_cm$overall["Accuracy"]
+
+```
+Veiem que no estem millorant massa els resultats, de fet, el mètode del vot majoritari té millors resultats. Anem a veure si podem modificar el llindar perquè sigui més òptim pels nostres resultats del promig de probabilitats.
+
+```{r}
+prob_llind_2cat <- seq(0.01, 0.99, by = 0.01)
+prob_2cat_results <- data.frame()
+
+for(t in prob_llind_2cat){
+  prob_llind_2cat_pred <- factor(ifelse(prob_2cat_mean >= t, "1", "0"), 
+                                 levels = c("0","1"))
+  prob_llind_2cat_cm <- confusionMatrix(prob_llind_2cat_pred, 
+                                        factor(y_knn_2cat_test, 
+                                               levels = c("0","1")),
+                                        mode = "prec_recall", positive = "1")
+  prob_2cat_results <- rbind(prob_2cat_results, data.frame(
+    llindar   = t,
+    Precision = prob_llind_2cat_cm$byClass["Precision"],
+    Recall    = prob_llind_2cat_cm$byClass["Recall"],
+    F1        = prob_llind_2cat_cm$byClass["F1"],
+    Accuracy  = prob_llind_2cat_cm$overall["Accuracy"]
+  ))
+}
+
+# Millor llindar per Accuracy
+prob_2cat_results[which.max(prob_2cat_results$Accuracy), ]
+
+```
+Observem que el llindar per seleccionar la classe 1 és 0.52, que és quan l'Accuracy és major. Tot i així no arribem al del vot majortiari. Aquest fet ja era d'esperar, ja que els nostres models no destaquen per tenir un rendiment alt i per tant, l'ensemble no pot superar-los gaire. 
+
+Com que no veiem un clar model que distorsioni les dades, detectarem outliers i així no els tindrem en compte per fer el càlcul de la mitjana de les probabilitats. 
+
+Per obtenir-ho, calculem la mediana de les 4 probabilitats i calcularem la desviació absoluta respecte la mediana. Si cap valor és llunyà, llavors farem servir els 4 models per calcular-ne la predicció final, si no, exclourem aquell outlier. 
+
+```{r}
+robust_mean_2cat <- function(x, k = 2){
+  med <- median(x)
+  mad_val <- mad(x, constant = 1)
+  
+  # si la MAD és 0 (totes iguals), fem mean normal
+  if(mad_val == 0){
+    return(mean(x))
+  }
+  
+  # filtrem valors que no siguin outliers
+  keep <- abs(x - med) <= k * mad_val
+  
+  # si tots són outliers (cas extrem), fem mean normal
+  if(sum(keep) == 0){
+    return(mean(x))
+  }
+  
+  mean(x[keep])
+}
+
+prob_2cat_robust <- apply(prob_2cat, 1, robust_mean_2cat)
+
+pred_2cat_robust <- factor(ifelse(prob_2cat_robust >= 0.5, "1", "0"), 
+                           levels = c("0","1"))
+
+cm_robust_2cat <- confusionMatrix(
+  pred_2cat_robust,
+  factor(y_knn_2cat_test, levels = c("0","1")),
+  mode = "prec_recall",
+  positive = "1"
+)
+
+
+
+```
+Analitzem el llindar òptim:
+```{r}
+robust_2cat_results <- data.frame()
+
+for(t in prob_llind_2cat){
+  prob_rob_llind_2cat_pred <- factor(ifelse(prob_2cat_robust >= t, "1", "0"), 
+                                     levels = c("0","1"))
+  
+  rob_2cat_cm <- confusionMatrix(
+    prob_rob_llind_2cat_pred,
+    factor(y_knn_2cat_test, levels = c("0","1")),
+    mode = "prec_recall",
+    positive = "1"
+  )
+  
+  robust_2cat_results <- rbind(
+    robust_2cat_results,
+    data.frame(
+      llindar   = t,
+      Precision = rob_2cat_cm$byClass["Precision"],
+      Recall    = rob_2cat_cm$byClass["Recall"],
+      F1        = rob_2cat_cm$byClass["F1"],
+      Accuracy  = rob_2cat_cm$overall["Accuracy"]
+    )
+  )
+}
+
+robust_2cat_results[which.max(robust_2cat_results$Accuracy), ]
+
+
+```
+Hem trobat que per un llindar de 0.44 per definir la classe 1, l'Accuracy ha augmentat lleugerament, i aproximadament és 70%. 
+
+## Stacking
+
+En aquest apartat fem l'ensemble utilitzant el mètode *Stacking*. La metodologia és entrenar varis models (k-NN, Naive Bayes, Random Forest i Support Vector Machine) i usar un meta-model per aprendre a combinar-los. Per això, generem 5 folds per generar les prediccions. 
+
+```{r}
+set.seed(123)
+
+y_train_2cat <- factor(y_knn_2cat_train, levels = c(0,1))
+y_test_2cat  <- factor(y_knn_2cat_test, levels = c(0,1))
+
+folds_2cat <- createFolds(y_train_2cat, k = 5)
+```
+
+### k-NN 2cat ensemble
+
+Generem les prediccions OOF per k-NN, per k = 21 òptim, que hem vist anteriorment. 
+
+```{r}
+oof_knn    <- factor(rep(NA, length(y_train_2cat)),levels = c(0,1))
+
+for (i in seq_along(folds_2cat)) {
+  idx <- folds_2cat[[i]]
+  
+  x_knn_train_2cat_fold <- x_knn_2cat_train[-idx,]
+  y_knn_train_2cat_fold <- y_train_2cat[-idx]
+
+  x_knn_2cat_valid_fold <- x_knn_2cat_train[idx,]
+  
+  # Predicció del fold amb el k = 21 òptim
+  pred_knn_2cat_fold <- knn(
+    train = x_knn_train_2cat_fold,
+    test  = x_knn_2cat_valid_fold,
+    cl    = y_knn_train_2cat_fold,
+    k     = 21
+  )
+  
+  oof_knn[idx] <- pred_knn_2cat_fold
+}
+```
+
+
+### Naive Bayes 2cat ensemble
+
+Generem les prediccions OOF del Naive Bayes.
+```{r}
+oof_nb <- factor(rep(NA, length(y_train_2cat)),levels = c(0,1))
+for(i in seq_along(folds_2cat)){
+  idx <- folds_2cat[[i]]
+  # TRAIN dins del train
+  x_nb_train_2cat_fold <- nb_data_train_x[-idx,]
+  y_nb_train_2cat_fold <- nb_data_train_y[-idx]
+  # Validació dins del trian
+  x_nb_2cat_valid_fold <- nb_data_train_x[idx,]
+  # Entrenem NB
+  nb_fold_model_2cat <- naiveBayes(x = x_nb_train_2cat_fold,
+                                   y = y_nb_train_2cat_fold,
+                                   laplace = 1)
+  # Predicció OOF
+  pred_nb_2cat_fold <- predict(nb_fold_model_2cat,
+                               newdata = x_nb_2cat_valid_fold)
+  oof_nb[idx]  <- pred_nb_2cat_fold
+}
+```
+Prediccions del Naive Bayes sobre el test.
+```{r}
+pred_nb_test_2cat <- predict(nb_data_model,
+                             newdata = nb_data_test_x)
+```
+
+
+### Random Forest 2cat ensemble
+
+Generem les prediccions OOF del Random Forest amb ntree = 500, mtry = 4 i nodesize = 15, com a hiperparàmetres òptims que hem trobat en els anteriors anàlisis. 
+
+```{r}
+oof_rf    <- factor(rep(NA, length(y_train_2cat)),levels = c(0,1))
+
+for (i in seq_along(folds_2cat)) {
+  idx <- folds_2cat[[i]]
+  
+  x_rf_train_2cat_fold <- rf_data_train_x[-idx,]
+  y_rf_train_2cat_fold <- y_train_2cat[-idx]
+
+  x_rf_2cat_valid_fold <- rf_data_train_x[idx,]
+  
+  #Entrenament RF en aquest fold
+  rf_fold_model_2cat <- randomForest(
+    x = x_rf_train_2cat_fold,
+    y = y_rf_train_2cat_fold,
+    ntree = 500,
+    mtry = 4,
+    nodesize = 15
+  )
+  
+  # Predicció del fold
+  pred_rf_2cat_fold <- predict(rf_fold_model_2cat,
+                              x_rf_2cat_valid_fold)
+  
+  oof_rf[idx] <- pred_rf_2cat_fold
+}
+```
+Prediccions test del Random Forest.
+```{r}
+rf_final_model_2cat <- randomForest(x = rf_data_train_x,
+                                    y = y_train_2cat,
+                                    ntree = 500,
+                                    mtry = 4,
+                                    nodesize = 15)
+pred_rf_test_2cat   <- predict(rf_final_model_2cat, rf_data_test_x)
+pred_rf_test_2cat   <- factor(pred_rf_test_2cat, levels = c("0", "1"))
+```
+
+### Support Vector Machine 2cat ensemble
+
+Generem l'OOF del SVM prenent com a hiperparàmetres els mateixos que hem trobat amb els anàlisis anteriors com a òptims (kernel = "linear" i cost = 1).
+```{r}
+oof_svm  <- factor(rep(NA, length(y_train_2cat)),levels = c(0,1))
+for(i in seq_along(folds_2cat)){
+  x_svm_train_2cat_fold <- svm_data_train_x[-idx,]
+  y_svm_train_2cat_fold <- svm_data_train_y[-idx]
+  
+  x_svm_2cat_valid_fold <- svm_data_train_x[idx,]
+  
+  svm_fold_model_2cat   <- svm(x = x_svm_train_2cat_fold,
+                               y = y_svm_train_2cat_fold,
+                               kernel = "linear",
+                               cost = 1,
+                               scale = TRUE,
+                               probability = TRUE)
+  # Predicció OOF
+  pred_svm_2cat_fold <- predict(svm_fold_model_2cat,
+                                newdata = x_svm_2cat_valid_fold)
+  oof_svm[idx] <- pred_svm_2cat_fold
+}
+```
+Prediccions del SVM sobre el test.
+```{r}
+svm_final_model <-svm(x = svm_data_train_x,
+                      y = svm_data_train_y,
+                      kernel = "linear",
+                      cost = 1,
+                      probability = TRUE,
+                      scale = TRUE)
+pred_svm_test_2cat <- predict(svm_final_model,
+                              newdata = svm_data_test_x)
+```
+
+
+### Meta-model
+
+Construim els conjunts de dades per al meta-model. 
+
+```{r}
+# Train del meta-model
+stack_train_2cat <- data.frame(
+  knn = factor(oof_knn, levels = c("0", "1")),
+  nb  = factor(oof_nb, levels = c("0", "1")),
+  rf  = factor(oof_rf, levels = c("0", "1")),
+  svm = factor(oof_svm, levels = c("0", "1")),
+  y   = y_train_2cat
+)
+
+# Test del meta-model
+test_stack_2cat <- data.frame(
+  knn = factor(pred_knn_best_2cat, levels = c("0", "1")),
+  nb  = factor(pred_nb_test_2cat,  levels = c("0", "1")),
+  rf  = factor(pred_rf_test_2cat,  levels = c("0", "1")),
+  svm = factor(pred_svm_test_2cat, levels = c("0", "1"))
+)
+```
+Entrenem el meta-model i com que és una classificació binària fem ús de la regressió logística.
+
+```{r}
+meta_model_2cat <- glm(y ~ knn+rf+nb+svm, data = stack_train_2cat,
+                       family = binomial)
+```
+
+Fem les prediccions finals sobre el test calculant les probabilitats per tal de poder-hi aplicar el llindar òptim. 
+```{r}
+prob_final_2cat <- predict(meta_model_2cat, test_stack_2cat, type = "response")
+```
+
+
+
+Ajustem el llindar de les probabilitats per decidir la classe per maximitzar l'accuracy.
+
+```{r}
+# Probabilitats del meta-model sobre el train (OOF), per buscar el millor llindar
+prob_oof_2cat <- predict(meta_model_2cat, stack_train_2cat, type = "response")
+
+llind_2cat <- seq(0,1, by = 0.01)
+stack_res_2cat <- data.frame()
+
+for(t in llind_2cat){
+  pred_t <- factor(ifelse(prob_oof_2cat >= t, "1", "0"),
+                   levels = c("0", "1"))
+  cm_2cat_t <- confusionMatrix(
+    factor(pred_t, levels = c("0", "1")),
+    factor(y_train_2cat, levels = c("0", "1")),
+    mode = "prec_recall",
+    positive = "1"
+  )
+  stack_res_2cat <- rbind(
+    stack_res_2cat,
+    data.frame(llindar   = t,
+               Precision = cm_2cat_t$byClass["Precision"],
+               Recall    = cm_2cat_t$byClass["Recall"],
+               F1        = cm_2cat_t$byClass["F1"],
+               Accuracy  = cm_2cat_t$overall["Accuracy"])
+  )
+}
+
+# Millor llindar per Accuracy
+
+pred_stack_best_2cat  <- stack_res_2cat[which.max(stack_res_2cat$Accuracy),]
+llind_stack_best_2cat <- pred_stack_best_2cat$llindar
+
+pred_final_2cat <- factor(ifelse(prob_final_2cat >= llind_stack_best_2cat,
+                                 "1", "0"),
+                          levels = c("0", "1"))
+
+confusionMatrix(factor(pred_final_2cat, levels = c("0", "1")),
+                factor(y_test_2cat, levels = c("0", "1")),
+                mode = "prec_recall",
+                positive = "1")
+pred_stack_best_2cat
+```
+
+Obtenim que optimitzant el llindar, l'Accuracy és 0.7259. 
+
+## Resultats pel problema binari
+
+Un cop tenim els resultats per cada model, els posem en comú fent servir el resultat amb millor rendiment que hem trobat en cada cas amb la mètrica *Accuracy*:
+
+```{r, include = FALSE}
+res_ensembl_bin <- data.frame(
+  model = c("vot majoritari", "promig probabilitats", "stacking"),
+  accuracy = c(confusionMatrix(factor(apply(pred_2cat[, c("knn", "rf")], 1, vot_maj_2cat), 
+                       levels = c("0", "1")), pred_2cat[, "test"], 
+               mode = "prec_recall", positive = "1")$overall["Accuracy"],
+              robust_2cat_results[which.max(robust_2cat_results$Accuracy), ]$Accuracy,
+              pred_stack_best_2cat$Accuracy
+              )
+)
+```
+
+```{r, fig.width=10, fig.height=6, echo = FALSE}
+ggplot(res_ensembl_bin, aes(x = reorder(model, accuracy), y = accuracy, fill = model)) +
+  geom_col(width = 0.6) + 
+  geom_text(aes(label = round(accuracy, 3)), vjust = -0.5) +
+  theme_minimal() +
+  theme(legend.position = "none") +
+  labs(
+    title = "Accuracy entre models",
+    x = "Model",
+    y = "Accuracy"
+  )
+```
+
+Obtenim que el millor resultat és amb el model *Stacking* i, a més, és superior que el resultat trobat del millor model individual.

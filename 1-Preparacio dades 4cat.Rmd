@@ -1,0 +1,415 @@
+---
+title: "Prep4cat"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+
+# Preparació de les dades pel problema multiclasse
+
+En aquest codi fem una anàlisi descriptiva de les dades i el seu preprocessament per treballar més endavant amb la variable objectiu multiclasse de 4 classes. Comencem llegint les dades:
+
+```{r}
+analysisPath     <- getwd()
+filePath1        <- paste0(analysisPath, "/RACEPLUS_cohort1_pseudoanon.sav")
+filePath2        <- paste0(analysisPath, "/RACEPLUS_cohort2_pseudoanon.sav")
+data1           <- read_sav(filePath1)
+data2           <- read_sav(filePath2)
+data.table::setDT(data1)
+data.table::setDT(data2)
+```
+
+## Primer conjunt de dades
+
+Primer de tot ens centrem en el primer conjunt de dades i n'observem l'estructura i la coherència:
+
+```{r, results='hide'}
+str(data1)
+head(data1)
+summary(data1)
+```
+
+```{r}
+data1[, .N, by = RACE_CICAT]
+```
+
+
+Fem les conversions pertinents per obtenir variables numèriques en els casos necessaris:
+
+```{r}
+
+data1[, Gender := as.numeric(Gender)]
+data1[, Vomits := as.numeric(Vomits)]
+data1[, NivellConsciencia := as.numeric(NivellConsciencia)]
+data1[, FA := as.numeric(FA)]
+data1[, ACOS := as.numeric(ACOS)]
+data1[, DX_recodLVO := as.numeric(DX_recodLVO)]
+data1[, LVO := as.numeric(LVO)]
+data1[, Diagnostic_1 := as.numeric(Diagnostic_1)]
+data1[, Lugar_LVO := as.numeric(Lugar_LVO)]
+data1[, TTO := as.numeric(TTO)]
+
+```
+
+Transformem la variable *DX_recodLVO*, ja que la classe 3 és el mateix que la classe 2 (isquèmic no LVO), i la variable *Despertar* que té notacions diferents i la convertim a 0 i 1. 
+
+```{r}
+dat1 <- copy(data1)
+dim(dat1)
+dat1 <- dat1[DX_recodLVO == 3, DX_recodLVO := 2]    
+dat1 <- dat1[DX_recodLVO %in% c(1,2,4,5)]
+
+dat1 <- dat1[Despertar == "N", Despertar := "No"]
+dat1 <- dat1[Despertar == "S", Despertar := "Si"]
+dat1 <- dat1[Despertar == "No", Despertar := 0]
+dat1 <- dat1[Despertar == "Si", Despertar := 1]
+dat1[,Despertar := as.numeric(Despertar)]
+```
+
+Eliminem variables que no podem utilitzar per ser variables que no entren en el nostre objectiu d'estudi. 
+```{r}
+dat1 <- dat1[, c("Hora_hosp", "Lugar_LVO", "LVO", 
+                 "Diagnostic_1", "ImatgeVasc", "TTO") := NULL]
+```
+
+En aquest conjunt de dades tenim valors perduts i els imputem a través de MICE. 
+
+```{r}
+colSums(is.na(dat1))
+sum(is.na(dat1))
+
+```
+
+```{r, fig.width=10, fig.height=6}
+vis_miss(dat1)
+invisible(mice::md.pattern(dat1, plot = TRUE))
+```
+
+
+Creem unes noves variables que transformen les hores en segons
+```{r}
+dat1[, Hora_inici_seg := period_to_seconds(hms(dat1[,Hora_inici]))]
+dat1[, hora_alertaSEM_seg := period_to_seconds(hms(dat1[,hora_alertaSEM]))]
+```
+I apliquem MICE amb imputació simple ($m=1$) i el mètode *PMM*, que és l'estàndard per imputació numèrica. 
+```{r, results='hide'}
+for_imp <- dat1[, .SD, .SDcols = c("RACEPLUS_ID", "Age", "Gender", "RACE_CICAT", "TAS", 
+                                   "TAD", "Glic", "Vomits", "NivellConsciencia", "FA", 
+                                   "ACOS", "Despertar", "DX_recodLVO", 
+                                   "Hora_inici_seg", "hora_alertaSEM_seg")]
+imp <- mice(for_imp, m = 1, maxit = 10, seed = 123) 
+```
+Observem com han quedat les nostres dades, per exemple amb la variable Glic que és la que tenia més valors perduts:
+```{r}
+densityplot(imp, ~ Glic) 
+imp <- complete(imp)
+data.table::setDT(imp)
+plot(imp, c("Glic", "TAD", "Hora_inici_seg"))  
+```
+Observem com s'han imputat els NA de la variable *Glic*
+```{r, results='hide'}
+imp[RACEPLUS_ID %in% for_imp[is.na(Glic), RACEPLUS_ID]]
+```
+
+Per la nostra anàlisi és necessari convertir les hores, i ens quedarem amb la variable que indica l'hora d'inici dels símptomes i amb la variable que conta els segons fins que es dona l'alerta al Sistema d'Emergències Mèdiques (SEM). A més, per tal de treballar correctament amb les dades i que els nostres models les aprenguin correctament, transformarem l'hora a codificació cíclica amb trigonometria. 
+
+```{r}
+cohort1 <- copy(imp)
+cohort1[, diff_hora_seg := ifelse(hora_alertaSEM_seg < Hora_inici_seg,
+                      hora_alertaSEM_seg + dhours(24) - Hora_inici_seg,
+                      hora_alertaSEM_seg - Hora_inici_seg) ]
+sum(cohort1$diff_hora_seg == 0)
+
+cohort1[, Hora_inici := sprintf("%02d:%02d:%02d", 
+                                Hora_inici_seg %/% 3600, 
+                                (Hora_inici_seg %% 3600) %/% 60, 
+                                Hora_inici_seg %% 60)]
+cohort1[, hora_alertaSEM := sprintf("%02d:%02d:%02d", 
+                                    hora_alertaSEM_seg %/% 3600, 
+                                    (hora_alertaSEM_seg %% 3600) %/% 60, 
+                                    hora_alertaSEM_seg %% 60)]
+
+dia_en_seg <- 24*60*60
+
+cohort1[, Hora_inici_trig := 2*pi*Hora_inici_seg / dia_en_seg]
+cohort1[, Hora_sin := sin(Hora_inici_trig)]
+cohort1[, Hora_cos := cos(Hora_inici_trig)]
+data.table::setDT(cohort1)
+
+```
+
+Finalment fem una descriptiva de les hores com queden repartides.
+
+```{r, fig.width=10, fig.height=6}
+hist(cohort1$diff_hora_seg)
+rose.diag(circular(cohort1$Hora_inici_trig, units = "radians", template = "clock24"),
+          bins = 24,
+          col = "skyblue",
+          prop = 2.5)
+```
+
+Finalment deixem el nostre primer conjunt de dades preparat per treballar-hi. 
+
+```{r}
+coh1 <- cohort1[, .SD, .SDcols = c("Age", "Gender", "RACE_CICAT", "TAS", "TAD", "Glic", 
+                                   "Vomits", "NivellConsciencia", "FA", "ACOS", "Despertar", 
+                                   "DX_recodLVO", "diff_hora_seg", "Hora_sin", "Hora_cos")]
+
+vars_pred <- c("Age", "Gender", "RACE_CICAT", "TAS", "TAD", "Glic", "Vomits", 
+               "NivellConsciencia", "FA", "ACOS", "Despertar", "diff_hora_seg", 
+               "Hora_sin", "Hora_cos")
+```
+
+## Segon conjunt de dades
+
+Ara seguim amb el mateix procés però pel segon conjunt de dades:
+
+```{r, results='hide'}
+str(data2)
+head(data2)
+summary(data2)
+
+
+data2[, SEXE := as.numeric(SEXE)]
+data2[, HTA := as.numeric(HTA)]
+data2[, DM := as.numeric(DM)]
+data2[, DISLIPEMIA := as.numeric(DISLIPEMIA)]
+data2[, FIBRILACIO_AURICULAR := as.numeric(FIBRILACIO_AURICULAR)]
+data2[, CARDIOPATIA_ISQUEMICA := as.numeric(CARDIOPATIA_ISQUEMICA)]
+data2[, ICTUS_PREVIS := as.numeric(ICTUS_PREVIS)]
+data2[, ANTICOAGULACIO := as.numeric(ANTICOAGULACIO)]
+data2[, DEPENDENCIA_TABAC := as.numeric(DEPENDENCIA_TABAC)]
+data2[, ABUS_ALCOHOL := as.numeric(ABUS_ALCOHOL)]
+data2[, ALT_NIVEL_CONCIENCIA := as.numeric(ALT_NIVEL_CONCIENCIA)]
+data2[, VOMITS := as.numeric(VOMITS)]
+data2[, Dx_4cat := as.numeric(Dx_4cat)]
+data2[, ARTERIA_OCLUIDA := as.numeric(ARTERIA_OCLUIDA)]
+
+```
+
+```{r}
+data2[, .N, by = Dx_4cat]
+```
+
+
+```{r}
+dat2 <- copy(data2)
+dim(dat2)
+```
+
+Amb aquest conjunt de dades tenim informació afegida sobre les hores dels símptomes i d'alerta al SEM, podem mirar les dates en què han ocorregut. Establim que totes aquelles diferències horàries de més de 36 hores seran valors perduts, per falta de coherència, igualment ho establim d'aquesta manera amb les diferències negatives. 
+
+```{r, results='hide'}
+dat2[, diff_days := as.numeric(DATA_ATENCIÓ_SEM - DATAINICISIMPTOMATOLOGIA)]
+dat2[, .N, by = diff_days] 
+dat2[, inici := as.POSIXct(paste(DATAINICISIMPTOMATOLOGIA, HORAINICISIMPTOMATOLOGIA),
+                           format = "%Y-%m-%d %H:%M:%S")]
+dat2[, sem := as.POSIXct(paste(DATA_ATENCIÓ_SEM, HORA_ATENCIÓ_SEM),
+                           format = "%Y-%m-%d %H:%M:%S")]
+dat2[, diff_hores := as.numeric(difftime(sem, inici, units = "hours"))]
+dat2[diff_hores < 0]   # 17 observacions --> NA
+dat2[diff_hores > 36]   # 9 observacions --> NA
+dat2[diff_hores < 0 | diff_hores > 36, 
+     c("DATAINICISIMPTOMATOLOGIA", "HORAINICISIMPTOMATOLOGIA", 
+       "DATA_ATENCIÓ_SEM", "HORA_ATENCIÓ_SEM") := NA]
+```
+Eliminem les variables que no podem utilitzar:
+```{r}
+cohort2 <- dat2[, c("Temps_INICISintomes_HOSPITAL", "HTA", "DM", "DISLIPEMIA", 
+                    "CARDIOPATIA_ISQUEMICA", "ICTUS_PREVIS", "DEPENDENCIA_TABAC", 
+                    "ABUS_ALCOHOL", "ARTERIA_OCLUIDA", "diff_days") := NULL]
+
+dim(cohort2)
+```
+Ara ja estem en disposició de tractar els valors perduts.
+```{r}
+colSums(is.na(cohort2))
+sum(is.na(cohort2))
+ 
+
+```
+
+```{r}
+vis_miss(cohort2)
+invisible(mice::md.pattern(cohort2, plot = TRUE))
+```
+
+
+```{r, results='hide'}
+cohort2[HORAINICISIMPTOMATOLOGIA == "", HORAINICISIMPTOMATOLOGIA := NA]
+cohort2[HORA_ATENCIÓ_SEM == "", HORA_ATENCIÓ_SEM := NA]
+cohort2[!is.na(HORAINICISIMPTOMATOLOGIA), inici_seg := as.numeric(as.ITime(inici))]
+cohort2[!is.na(HORA_ATENCIÓ_SEM), dif_seg := as.numeric(difftime(sem, inici, 
+                                                                 units = "secs"))]
+for_imp2 <- cohort2[, .SD, .SDcols = c("ESCALA_RACE", "EDAT", "SEXE", 
+                                       "FIBRILACIO_AURICULAR", "ANTICOAGULACIO",
+                                       "PRESSIO_ARTERIAL_SISTOLICA", 
+                                      "PRESSIO_ARTERIA_DIASTOLICA", "GLICEMIA", 
+                                      "ALT_NIVEL_CONCIENCIA", "VOMITS", 
+                                      "Dx_4cat", "inici_seg", "dif_seg")]
+
+imp2 <- mice(for_imp2, m = 1, maxit = 10, seed = 123, method = "pmm")
+```
+
+```{r}
+densityplot(imp2)
+stripplot(imp2)
+```
+```{r}
+imp2 <- complete(imp2)
+data.table::setDT(imp2)
+```
+
+Hem obtingut bones imputacions. Tal com hem fet amb el primer conjunt, ara ja podem passar a transformar les hores:
+
+```{r}
+coh_2 <- copy(imp2)
+coh_2[, Hora_inici := sprintf("%02d:%02d:%02d", 
+                              inici_seg %/% 3600, 
+                              (inici_seg %% 3600) %/% 60, inici_seg %% 60)]
+dia_en_seg <- 24*60*60
+
+coh_2[, Hora_inici_trig := 2*pi*inici_seg / dia_en_seg]   
+coh_2[, Hora_sin := sin(Hora_inici_trig)]
+coh_2[, Hora_cos := cos(Hora_inici_trig)]
+data.table::setDT(coh_2)
+```
+
+```{r, fig.width=10, fig.height=6}
+hist(coh_2$dif_seg)
+rose.diag(circular(coh_2$Hora_inici_trig, units = "radians", template = "clock24"),
+          bins = 24,
+          col = "skyblue",
+          prop = 2.5)
+```
+
+
+Finalment deixem el nostre segon conjunt de dades preparat per treballar-hi.
+
+```{r}
+coh2 <- coh_2[, .SD, .SDcols = c("EDAT", "SEXE", "ESCALA_RACE", 
+                                 "PRESSIO_ARTERIAL_SISTOLICA", "PRESSIO_ARTERIA_DIASTOLICA", 
+                                 "GLICEMIA", "VOMITS", "ALT_NIVEL_CONCIENCIA", 
+                                 "FIBRILACIO_AURICULAR", "ANTICOAGULACIO", 
+                                 "Dx_4cat", "dif_seg", "Hora_sin", "Hora_cos")]
+```
+
+## Unió conjunts de dades
+
+Ara ja estem en condicions de fer la unió dels nostres dos conjunts de dades, per això, hem d'unificar el nom de les variables i modificar la variable que representa la classe de diagnòstic que es pateix.
+
+```{r}
+# Variables unificades
+vars_cohort  <- c("EDAT", "SEXE", "ESCALA_RACE", "TAS", "TAD", "GLIC", "VOMITS", 
+                  "NIVELL_CONSC", "FA", "ACOS", "Dx_4cat", "diff_hora_seg", 
+                  "Hora_sin", "Hora_cos")
+# Variables a canviar del coh1
+vars_coh1    <- c("Age", "Gender", "RACE_CICAT", "TAS", "TAD", "Glic", "Vomits", 
+                  "NivellConsciencia", "FA", "ACOS", "DX_recodLVO", "diff_hora_seg", 
+                  "Hora_sin", "Hora_cos")
+# Variables a canviar del coh2
+vars_coh2    <- c("EDAT", "SEXE", "ESCALA_RACE", "PRESSIO_ARTERIAL_SISTOLICA", 
+                  "PRESSIO_ARTERIA_DIASTOLICA", "GLICEMIA", "VOMITS", 
+                  "ALT_NIVEL_CONCIENCIA", "FIBRILACIO_AURICULAR", "ANTICOAGULACIO", 
+                  "Dx_4cat", "dif_seg", "Hora_sin", "Hora_cos")
+#Canvi noms variables
+setnames(coh1, old = vars_coh1, new = vars_cohort)
+setnames(coh2, old = vars_coh2, new = vars_cohort, skip_absent = TRUE)
+```
+
+```{r}
+table(coh1$Dx_4cat)
+table(coh2$Dx_4cat)
+coh1[Dx_4cat == 4, Dx_4cat := 3]
+coh1[Dx_4cat == 5, Dx_4cat := 4]
+table(coh1$Dx_4cat)
+```
+Ara ja podem ajuntar els dos conjunts de dades i definir les variables predictores. 
+
+```{r, results='hide'}
+cohort         <- rbind(coh1[, ..vars_cohort], 
+                        coh2[, ..vars_cohort],
+                        use.names = TRUE, fill = TRUE)
+
+
+summary(cohort)
+
+```
+
+```{r}
+dim(cohort)
+cohort[, .N, by = ESCALA_RACE][order(-N)]
+table(cohort$ESCALA_RACE)
+prop.table(table(cohort$ESCALA_RACE))
+table(cohort$Dx_4cat)
+
+# Variables predictores
+vars_pred_coh  <- c("EDAT", "SEXE", "ESCALA_RACE", "TAS", "TAD", "GLIC", "VOMITS", 
+                    "NIVELL_CONSC", "FA", "ACOS", "diff_hora_seg", "Hora_sin", "Hora_cos")
+```
+
+Observem que la variable objectiu, *Dx_4cat*, és desbalancejada, fet que tindrem en compte amb els anàlisis posteriors. 
+
+La nostra variable *cohort* és la unió dels dos conjunts de dades i és la que ens permetrà treballar amb els models d'aprenentatge automàtic. 
+
+Les mètriques per avaluar els models seran: F1-macro i accuracy, tot i que s'han calculat el valor predictiu positiu i Recall.  
+
+Afegit perquè necessito aquest diagrama per la memòria final:
+```{r}
+coh_hora_trig <- rbind(cohort1[,"Hora_inici_trig"],
+                       coh_2[,"Hora_inici_trig"])
+rose.diag(circular(coh_hora_trig$Hora_inici_trig, units = "radians", template = "clock24"),
+          bins = 24,
+          col = "skyblue",
+          prop = 2.5)
+```
+
+Afegeixo el diagrama de barres per veure el desbalanceig de les dades:
+```{r}
+barplot(table(cohort$Dx_4cat), 
+        col = "skyblue", 
+        names.arg = c("isquèmic OGV", "isquèmic no OGV", "hemorràgic", "mímic"),
+        main = "Distribució de variable objectiu", 
+        xlab = "Diagnòstic", 
+        ylab = "Freqüència")
+```
+
+## Unió cjnts de dades separant el cjnt.
+
+```{r}
+coh11 <- copy(coh1)
+coh22 <- copy(coh2)
+```
+
+```{r}
+coh11[, dataset := 1]
+coh22[, dataset := 2] 
+```
+
+```{r}
+cohort12         <- rbind(coh11[, .SD, .SDcols = c(vars_cohort, "dataset")],
+                          coh22[, .SD, .SDcols = c(vars_cohort, "dataset")])
+
+cohort12[, Dx_4cat := factor(Dx_4cat, levels = c("1", "2", "3", "4"))]
+cohort12[, SEXE := as.factor(SEXE)]
+cohort12[, ESCALA_RACE := as.factor(ESCALA_RACE)]
+cohort12[, VOMITS := as.factor(VOMITS)]
+cohort12[, VOMITS := as.factor(VOMITS)]
+cohort12[, NIVELL_CONSC := as.factor(NIVELL_CONSC)]
+cohort12[, FA := as.factor(FA)]
+cohort12[, ACOS := as.factor(ACOS)]
+
+# Descriptiva de la variable resposta
+desc_resp_4cat <- createTable(compareGroups(~ Dx_4cat, data = cohort12))
+desc_resp_4cat$descr[,1]
+# desc_pred_4cat <- createTable(compareGroups(~ . - Dx_4cat - dataset, data = cohort12))
+# Descriptiva estratificada per la variable resposta
+desc_clas_4cat <- createTable(compareGroups(Dx_4cat ~ . - dataset, data = cohort12), show.p.overall = FALSE)
+# Desciptiva cmoparant dataset 1 vs dataset 2
+desc_data_4cat <- createTable(compareGroups(dataset ~ . , data = cohort12), show.p.overall = FALSE)
+```
+
+
+
+
