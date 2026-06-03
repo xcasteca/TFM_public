@@ -399,15 +399,19 @@ cohort12[, VOMITS := as.factor(VOMITS)]
 cohort12[, NIVELL_CONSC := as.factor(NIVELL_CONSC)]
 cohort12[, FA := as.factor(FA)]
 cohort12[, ACOS := as.factor(ACOS)]
+cohort12[, Dx_2cat := as.integer(Dx_4cat == 1)]
+cohort12[, Dx_2cat := factor(Dx_2cat, levels = c("0", "1"))]
+
+# Desciptiva cmoparant dataset 1 vs dataset 2
+desc_data_4cat <- createTable(compareGroups(dataset ~ . , data = cohort12), show.p.overall = FALSE)
 
 # Descriptiva de la variable resposta
 desc_resp_4cat <- createTable(compareGroups(~ Dx_4cat, data = cohort12))
 desc_resp_4cat$descr[,1]
 # desc_pred_4cat <- createTable(compareGroups(~ . - Dx_4cat - dataset, data = cohort12))
 # Descriptiva estratificada per la variable resposta
-desc_clas_4cat <- createTable(compareGroups(Dx_4cat ~ . - dataset, data = cohort12), show.p.overall = FALSE)
-# Desciptiva cmoparant dataset 1 vs dataset 2
-desc_data_4cat <- createTable(compareGroups(dataset ~ . , data = cohort12), show.p.overall = FALSE)
+desc_clas_4cat <- createTable(compareGroups(Dx_4cat ~ . - dataset - Dx_2cat, data = cohort12), show.p.overall = FALSE)
+
 ```
 
 
